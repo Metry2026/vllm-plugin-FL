@@ -298,6 +298,27 @@ class LlmQualityTests(unittest.TestCase):
         "ese powerful tools serve beneficial purposes in society."
     )
 
+    # CI 38217045154 actual text_single response; source SHA256 6c11345ef7eeb947a9b4e522ad90c6469d5d558340c262950c5ecb3b5b15799e.
+    CI_LATEST_GRAPH_TEXT = (
+        "Large language models (LLMs) are advanced artificial intelligence systems de"
+        "signed to understand, generate, and manipulate human language with remarkabl"
+        "e fluency. These models are built upon deep learning architectures, primaril"
+        "y the transformer network, which utilizes self-attention mechanisms to proce"
+        "ss sequential data efficiently. Training involves exposing the model to vast"
+        " datasets comprising text from books, websites, and articles, allowing it to"
+        " learn complex patterns, grammar, and factual knowledge through statistical "
+        "prediction of the next token in a sequence. During inference, the model gene"
+        "rates responses by calculating probabilities for subsequent words, enabling "
+        "tasks such as translation, summarization, coding assistance, and creative wr"
+        "iting. Despite their impressive capabilities, LLMs face significant limitati"
+        "ons, including the potential for generating hallucinated information, exhibi"
+        "ting biases present in training data, and lacking true reasoning or consciou"
+        "sness. Responsible use requires rigorous validation, transparency about mode"
+        "l origins, and continuous monitoring to mitigate risks associated with misin"
+        "formation and ethical concerns, ensuring these powerful tools serve as benef"
+        "icial aids rather than sources of harm."
+    )
+
     REPHRASED_TEXT = (
         "Large language models learn patterns from examples. Training adjusts their "
         "parameters on extensive text. During inference they predict likely next "
@@ -330,7 +351,7 @@ class LlmQualityTests(unittest.TestCase):
         )
 
     def test_versioned_oracle_accepts_three_real_responses_with_reviewable_spans(self):
-        self.assertEqual(self.quality.ORACLE_VERSION, "2.1-llm-concepts")
+        self.assertEqual(self.quality.ORACLE_VERSION, "2.2-llm-concepts")
         for text in (self.V51_TEXT, self.CI_GRAPH_TEXT, self.CI_EAGER_TEXT):
             with self.subTest(text=text[:70]):
                 checks = self.checks(text)
@@ -716,6 +737,159 @@ class LlmQualityTests(unittest.TestCase):
                     self.quality.llm_explanation_evidence(text)["distinct_categories"],
                     categories,
                 )
+
+    def test_latest_real_graph_response_has_finite_including_evidence(self):
+        checks = self.checks(self.CI_LATEST_GRAPH_TEXT)
+        self.assertTrue(all(checks.values()), checks)
+        evidence = self.quality.llm_explanation_evidence(self.CI_LATEST_GRAPH_TEXT)
+        self.assertTrue(evidence["ordered"])
+        self.assertGreaterEqual(len(evidence["distinct_categories"]), 2)
+        normalized = self.quality.normalized_text(self.CI_LATEST_GRAPH_TEXT)
+        for row in evidence["limitations"]:
+            self.assertEqual(normalized[row["start"] : row["end"]], row["text"])
+
+    def test_finite_list_predicates_and_connectors_accept_representative_clauses(self):
+        for clause in (
+            "They face significant limitations, including hallucinations and bias.",
+            "This model faces limitations such as hallucinations and bias.",
+            "They have limitations including hallucinations and bias.",
+            "This model has limitations: hallucinations and bias.",
+            "They face limitations that include hallucinations and bias.",
+            "They have limitations which involve hallucinations and bias.",
+            "Their limitations include hallucinations and bias.",
+            "A limitation includes hallucinations and bias.",
+            "Their limitations involve hallucinations and bias.",
+            "A limitation involves hallucinations and bias.",
+            "Limitations persist, including hallucinations and bias.",
+            "Limitations remain, such as hallucinations and bias.",
+        ):
+            text = (
+                self.PREFIX + clause + " Responsible use requires independent review "
+                "of every claim before generated answers are used in practice."
+            )
+            with self.subTest(clause=clause):
+                self.assertTrue(all(self.checks(text).values()))
+                self.assertEqual(
+                    set(
+                        self.quality.llm_explanation_evidence(text)[
+                            "distinct_categories"
+                        ]
+                    ),
+                    {"factual_reliability", "bias"},
+                )
+
+        # Verified earlier V51 wording has a postposed finite predicate.
+        historical = (
+            self.PREFIX + "However, limitations such as hallucinations, bias, and "
+            "lack of true reasoning persist. Responsible use requires oversight."
+        )
+        self.assertTrue(all(self.checks(historical).values()))
+        self.assertEqual(
+            set(
+                self.quality.llm_explanation_evidence(historical)["distinct_categories"]
+            ),
+            {"factual_reliability", "bias", "understanding_reasoning"},
+        )
+
+    def test_finite_list_headings_denials_and_positive_capabilities_are_rejected(self):
+        for clause in (
+            "Limitations including hallucinations and bias.",
+            "Limitations such as hallucinations and bias.",
+            "Limitations: hallucinations and bias.",
+            "Limitations that include hallucinations and bias.",
+            "They do not face limitations, including hallucinations and bias.",
+            "They have no limitations that include hallucinations and bias.",
+            (
+                "They do not in fact generally face limitations, such as "
+                "hallucinations and bias."
+            ),
+            "They don’t face limitations, such as hallucinations and bias.",
+            "They don’t have limitations, including hallucinations and bias.",
+            "Their limitations include reliable reasoning and current information.",
+            "They have limitations including reliable reasoning and current information.",
+        ):
+            text = (
+                self.PREFIX + clause + " Responsible use requires independent review "
+                "of every claim before generated answers are used in practice."
+            )
+            with self.subTest(clause=clause):
+                checks = self.checks(text)
+                self.assertTrue(checks["minimum_length"])
+                self.assertFalse(checks["expected_semantics"])
+                self.assertFalse(checks["expected_order"])
+                self.assertEqual(
+                    self.quality.llm_explanation_evidence(text)["distinct_categories"],
+                    [],
+                )
+
+    def test_finite_list_requires_two_distinct_limitation_categories(self):
+        for clause, category in (
+            ("They face limitations, including hallucinations.", "factual_reliability"),
+            ("Their limitations include bias.", "bias"),
+        ):
+            text = (
+                self.PREFIX + clause + " Responsible use requires independent review "
+                "of every claim before generated answers are used in practice."
+            )
+            with self.subTest(clause=clause):
+                checks = self.checks(text)
+                self.assertTrue(checks["minimum_length"])
+                self.assertFalse(checks["expected_semantics"])
+                self.assertFalse(checks["expected_order"])
+                self.assertEqual(
+                    self.quality.llm_explanation_evidence(text)["distinct_categories"],
+                    [category],
+                )
+
+    def test_finite_list_evidence_before_training_and_inference_is_unordered(self):
+        text = (
+            "Large language models face limitations, including hallucinations and "
+            "bias. Training adjusts their parameters on extensive text. During "
+            "inference they predict likely next tokens to answer questions and "
+            "summarize material. Responsible use requires independent verification "
+            "of every generated claim before acting on the result."
+        )
+        checks = self.checks(text)
+        self.assertTrue(checks["expected_semantics"])
+        self.assertFalse(checks["expected_order"])
+        evidence = self.quality.llm_explanation_evidence(text)
+        self.assertEqual(
+            set(evidence["distinct_categories"]), {"factual_reliability", "bias"}
+        )
+        self.assertEqual(evidence["ordered_categories"], [])
+
+    def test_list_negation_scope_resets_only_at_an_explicit_new_subject(self):
+        for prefix in (
+            "Although not perfect, they",
+            "Although not perfect, these models still",
+        ):
+            text = (
+                self.PREFIX + prefix + " face limitations, including hallucinations "
+                "and bias. Responsible use requires independent verification before "
+                "acting on generated claims."
+            )
+            with self.subTest(prefix=prefix):
+                self.assertTrue(all(self.checks(text).values()))
+                self.assertEqual(
+                    set(
+                        self.quality.llm_explanation_evidence(text)[
+                            "distinct_categories"
+                        ]
+                    ),
+                    {"factual_reliability", "bias"},
+                )
+        negative = (
+            self.PREFIX + "They do not, however, face limitations, including "
+            "hallucinations and bias. Responsible use requires independent "
+            "verification before acting on generated claims."
+        )
+        checks = self.checks(negative)
+        self.assertTrue(checks["minimum_length"])
+        self.assertFalse(checks["expected_semantics"])
+        self.assertFalse(checks["expected_order"])
+        self.assertEqual(
+            self.quality.llm_explanation_evidence(negative)["limitations"], []
+        )
 
     def test_unknown_or_mismatched_profile_is_rejected(self):
         for required, profile in (

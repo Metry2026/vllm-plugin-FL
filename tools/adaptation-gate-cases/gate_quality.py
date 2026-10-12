@@ -6,7 +6,7 @@ import re
 import unicodedata
 from typing import Any
 
-ORACLE_VERSION = "2.1-llm-concepts"
+ORACLE_VERSION = "2.2-llm-concepts"
 LLM_EXPLANATION_PROFILE = "llm-explanation-v1"
 LLM_REQUIRED_TERMS = ("large language model", "training", "inference", "limitations")
 
@@ -40,16 +40,45 @@ _POSITIVE_PATTERNS = {
         r"\b(?:have|has)\s+(?:a\s+)?knowledge cutoff\b",
     ),
 }
-_LIST_CONTEXT = re.compile(
-    r"\b(?:limitations?|weaknesses?|drawbacks?|risks?)\s+"
-    r"(?:such as|include|includes|involve|involves|persist,?\s+such as|remain,?\s+such as)\b[^.!?;]{0,240}|"
-    # A comma-separated example needs a finite affirmative predicate; a bare
-    # "Limitations, such as ..." heading is not explanatory evidence.
-    r"\b(?:face(?:s)?|have|has)\s+(?:(?!no\b|not\b|never\b)\w+\s+){0,3}"
-    r"(?:limitations?|weaknesses?|drawbacks?|risks?)\s*,\s*such as\b[^.!?;]{0,240}"
+# List grammar has a finite affirmative predicate, before or after the list.
+# Connectors alone do not make "Limitations, including ..." a statement.
+_LIST_NOUN = r"(?:limitations?|weaknesses?|drawbacks?|risks?)"
+_LIST_CONNECTOR = (
+    r"(?:\s*,?\s+(?:such as|including)\b|"
+    r"\s+(?:that|which)\s+(?:include(?:s)?|involve(?:s)?)\b|\s*:\s*)"
 )
+_LIST_CONTEXT = re.compile(
+    rf"\b{_LIST_NOUN}\s+(?:include(?:s)?|involve(?:s)?)\b[^.!?;]{{0,240}}|"
+    rf"\b{_LIST_NOUN}\s+(?:persist(?:s)?|remain(?:s)?){_LIST_CONNECTOR}[^.!?;]{{0,240}}|"
+    r"\b(?:face(?:s)?|have|has)\s+(?:(?!no\b|not\b|never\b)\w+\s+){0,3}"
+    rf"{_LIST_NOUN}{_LIST_CONNECTOR}[^.!?;]{{0,240}}|"
+    # "Limitations such as hallucinations and bias persist" has a postposed
+    # finite predicate; removing "persist" leaves a rejected noun phrase.
+    rf"\b{_LIST_NOUN}\s*,?\s+(?:such as|including)\b"
+    r"[^.!?;]{0,220}\b(?:persist(?:s)?|remain(?:s)?)\s{0,8}$"
+)
+# A comma alone does not end a denial ("do not, however, face ...").
+# Reset only when it introduces an explicit new subject in the local clause.
+_LIST_NEW_CLAUSE = re.compile(
+    r",\s*((?:they|llms|(?:these|those|the) models?|large language models?)"
+    r"\b[^,]{0,80})$"
+)
+_LIST_DEFECT_PATTERNS = {
+    # Reasoning/current information alone are capabilities, not limitations.
+    # Also accept the existing finite category patterns below the list guard.
+    "understanding_reasoning": (
+        r"\b(?:lack(?:s|ing)?(?:\s+of)?|limited|unreliable|imperfect)\s+"
+        r"(?:(?:true|real|genuine|reliable|human|deep|robust)\s+)*"
+        r"(?:understanding|reasoning|consciousness)\b"
+    ),
+    "knowledge_freshness": (
+        r"\b(?:outdated|out.of.date|knowledge cutoff)\b|"
+        rf"\b(?:lack(?:s|ing)?(?:\s+of)?)\s+{_CATEGORIES['knowledge_freshness']}"
+    ),
+}
 _NEGATION = re.compile(
-    r"\b(?:no|not|never|without|free of|cannot|can't|don't|doesn't)\b"
+    r"\b(?:no|not|never|without|free of|cannot|can['\u2018\u2019]t|"
+    r"don['\u2018\u2019]t|doesn['\u2018\u2019]t)\b"
 )
 _DENIED_CONTEXT = re.compile(
     r"\b(?:not (?:true|correct|accurate)|no (?:evidence|proof|indication))\b"
@@ -127,13 +156,27 @@ def llm_explanation_evidence(text: str) -> dict[str, Any]:
                 # "never suffer from hallucinations" and "no limitations include"
                 # must not become affirmative evidence by matching a later verb.
                 before = body[: match.start()]
-                prefix = " ".join(re.findall(r"[\w']+", before)[-3:])
+                prefix = " ".join(re.findall(r"[\w'\u2018\u2019]+", before)[-3:])
                 prefix = re.sub(r"\bnot only\b", "", prefix)
-                if _NEGATION.search(prefix):
+                if match.re is not _LIST_CONTEXT and _NEGATION.search(prefix):
                     continue
-                # A list denying any listed problem is not limitation evidence.
-                if match.re is _LIST_CONTEXT and _NEGATION.search(match.group()):
-                    continue
+                if match.re is _LIST_CONTEXT:
+                    # A bounded clause prefix covers "do not in fact generally
+                    # face ..."; the old three-word window could lose "not".
+                    list_prefix = before[-120:]
+                    new_clause = _LIST_NEW_CLAUSE.search(list_prefix)
+                    if new_clause is not None:
+                        list_prefix = new_clause.group(1)
+                    list_prefix = re.sub(r"\bnot only\b", "", list_prefix)
+                    list_body = re.sub(r"\bnot only\b", "", match.group())
+                    if _NEGATION.search(list_prefix) or _NEGATION.search(list_body):
+                        continue
+                    defect = _LIST_DEFECT_PATTERNS.get(category)
+                    if defect is not None and not any(
+                        re.search(pattern, match.group())
+                        for pattern in (*_POSITIVE_PATTERNS[category], defect)
+                    ):
+                        continue
                 start, end = (
                     sentence.start() + match.start(),
                     sentence.start() + match.end(),
