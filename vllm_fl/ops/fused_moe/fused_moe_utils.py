@@ -25,7 +25,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
 
-from vllm_fl.dispatch import CachedOp
+from vllm_fl.dispatch import CachedOp, call_op
 from vllm_fl.ops.fused_moe.activation import apply_moe_activation
 from vllm_fl.utils import get_oot_blacklist, use_flaggems
 
@@ -93,6 +93,14 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
         _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
     elif current_platform.is_cpu():
         _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
+    elif getattr(current_platform, "vendor_name", "") == "iluvatar":
+        # TODO(corex): remove when PlatformFL is_cuda()/is_cuda_alike() is
+        # true. CoreX reports device_type=cuda but is_cuda()=False, so
+        # VLLM_FL_PREFER=vendor / USE_FLAGGEMS=0 hit UnboundLocalError here.
+        _AVAILABLE_BACKENDS = [
+            UnquantizedMoeBackend.TRITON,
+            UnquantizedMoeBackend.BATCHED_TRITON,
+        ]
     return _AVAILABLE_BACKENDS
 
 
@@ -286,6 +294,32 @@ class TritonExpertsFL(TritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        if (
+            hidden_states.device.type == "npu"
+            and self._lora_context is None
+            and self.quant_config.quant_dtype is None
+            and self.quant_config.weight_quant_dtype is None
+        ):
+            # v0.28 modular experts bypass the legacy fused_experts_impl patch.
+            # Generic Triton MoE kernels are not usable on Ascend 910C.
+            output.copy_(
+                call_op(
+                    "grouped_moe_experts",
+                    hidden_states,
+                    w1,
+                    w2,
+                    topk_weights,
+                    topk_ids,
+                    activation=activation.value,
+                    expert_map=expert_map,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                    w1_bias=self.w1_bias,
+                    w2_bias=self.w2_bias,
+                    clamp_limit=self.activation_config.clamp_limit,
+                )
+            )
+            return
+
         # vLLM 0.24 routes unquantized MoE through this modular Experts API.
         # Reuse the Kunlunxin implementation migrated from the known-good
         # plugin instead of entering the generic Triton two-GEMM pipeline.

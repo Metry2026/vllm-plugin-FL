@@ -41,7 +41,7 @@ class RotaryEmbeddingFL(RotaryEmbedding):
         # calls RotaryEmbedding with key=None for cross-layer KV sharing, so
         # preserve the upstream native path for that supported input.
         if key is None:
-            return super().forward_native(positions, query, key)
+            return self.forward_native(positions, query, key)
 
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         positions = positions.flatten()

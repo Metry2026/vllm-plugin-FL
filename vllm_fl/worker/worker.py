@@ -108,6 +108,17 @@ def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> 
     )
 
 
+def _normalize_process_group_backend(backend: str) -> str:
+    """Return the torch.distributed backend for the active platform."""
+    if current_platform.device_type == "ptpu" and backend in {"flagcx", "nccl"}:
+        return "pccl"
+    if current_platform.device_type == "npu" and backend == "flagcx":
+        # CommunicatorFL uses FlagCX for tensor-parallel collectives; torch
+        # process groups still use the NPU's native backend.
+        return "hccl"
+    return backend
+
+
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -442,6 +453,11 @@ class WorkerFL(WorkerBase):
         checkpoint_restore_distributed_state()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
+        # Ascend allocates weights and KV cache through torch_npu. The empty
+        # vLLM build has no CuMem sleep-mode allocator.
+        if current_platform.device_type == "npu":
+            return nullcontext()
+
         if (
             current_platform.is_cuda_alike()
             and not self.vllm_config.model_config.enable_cumem_allocator
@@ -455,6 +471,15 @@ class WorkerFL(WorkerBase):
             return nullcontext()
 
         if current_platform.is_cpu():
+            return nullcontext()
+
+        # CoreX/Iluvatar (and any other out-of-tree vendor whose platform reports
+        # is_cuda_alike()==False) supports neither the CuMem nor the XPU sleep-mode
+        # allocator. vLLM 0.28 raises RuntimeError from get_mem_allocator_instance()
+        # for such platforms, so gate on the same capability predicate the upstream
+        # interface exposes. On NVIDIA this stays True and behaviour is unchanged.
+        # TODO(corex): drop once the plugin's sleep-mode path is vendor-neutral.
+        if not current_platform.is_sleep_mode_available():
             return nullcontext()
 
         allocator = get_mem_allocator_instance()
@@ -1641,7 +1666,7 @@ def init_worker_distributed_environment(
         rank,
         init_method,
         local_rank,
-        backend,
+        _normalize_process_group_backend(backend),
         timeout,
     )
 

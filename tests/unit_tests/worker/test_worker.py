@@ -4,6 +4,8 @@
 
 import pytest
 
+from tests.utils.device_utils import skip_if_not_nvidia
+
 
 def has_vllm_worker() -> bool:
     try:
@@ -14,9 +16,81 @@ def has_vllm_worker() -> bool:
         return False
 
 
+def has_native_cuda_extension() -> bool:
+    """True only on NVIDIA builds that ship vllm._C_stable_libtorch."""
+    try:
+        import vllm._C_stable_libtorch  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
 pytestmark = pytest.mark.skipif(
     not has_vllm_worker(), reason="vllm_fl.worker.worker is unavailable"
 )
+
+# CoreX/empty images expose torch.cuda but lack the native NVIDIA extension.
+# Gate nvidia-only tests on the extension so skip_if_not_nvidia alone is not
+# enough when FL_BACKEND is unset and cuda.is_available() is True.
+skip_if_no_native_cuda_ext = pytest.mark.skipif(
+    not has_native_cuda_extension(),
+    reason="Requires native vLLM CUDA extension (vllm._C_stable_libtorch)",
+)
+
+
+@pytest.mark.parametrize("tag", ["weights", "kv_cache"])
+def test_ascend_does_not_request_cuda_memory_pool(monkeypatch, tag):
+    from types import SimpleNamespace
+
+    from vllm_fl.worker import worker as worker_module
+
+    monkeypatch.setattr(
+        worker_module, "current_platform", SimpleNamespace(device_type="npu")
+    )
+
+    def unavailable_allocator():
+        raise AssertionError("Ascend must not request the CUDA allocator")
+
+    monkeypatch.setattr(
+        worker_module, "get_mem_allocator_instance", unavailable_allocator
+    )
+    worker = worker_module.WorkerFL.__new__(worker_module.WorkerFL)
+    with worker._maybe_get_memory_pool_context(tag):
+        pass
+
+
+def test_sunrise_process_group_uses_pccl(monkeypatch):
+    from vllm_fl.worker import worker as worker_module
+
+    monkeypatch.setattr(worker_module.current_platform, "device_type", "ptpu")
+
+    assert worker_module._normalize_process_group_backend("flagcx") == "pccl"
+    assert worker_module._normalize_process_group_backend("nccl") == "pccl"
+    assert worker_module._normalize_process_group_backend("gloo") == "gloo"
+
+
+@pytest.mark.parametrize(
+    "device_type,flagcx_backend",
+    [
+        ("npu", "hccl"),
+        ("cuda", "flagcx"),
+        ("musa", "flagcx"),
+        ("maca", "flagcx"),
+        ("cpu", "flagcx"),
+    ],
+)
+@pytest.mark.parametrize("backend", ["flagcx", "nccl", "pccl", "hccl", "gloo"])
+def test_sunrise_process_group_mapping_is_ptpu_only(
+    monkeypatch, device_type, flagcx_backend, backend
+):
+    from vllm_fl.worker import worker as worker_module
+
+    monkeypatch.setattr(worker_module.current_platform, "device_type", device_type)
+
+    # Preserve Ascend's own native process group when TP collectives use FlagCX.
+    expected = flagcx_backend if backend == "flagcx" else backend
+    assert worker_module._normalize_process_group_backend(backend) == expected
 
 
 def test_worker_keeps_target_lifecycle_contract():
@@ -51,13 +125,14 @@ def test_worker_selects_v1_or_v2_model_runner():
     assert "ModelRunnerFL" in source
 
 
-def test_platform_accepts_v2_model_runner():
+def test_platform_accepts_v2_model_runner(monkeypatch):
     from types import SimpleNamespace
 
     from vllm.config import CUDAGraphMode
 
     from vllm_fl.platform import PlatformFL
 
+    monkeypatch.setattr(PlatformFL, "device_type", "cuda")
     parallel_config = SimpleNamespace(
         worker_cls=None,
         all2all_backend=None,
@@ -81,7 +156,10 @@ def test_platform_accepts_v2_model_runner():
     assert parallel_config.worker_cls == "vllm_fl.worker.worker.WorkerFL"
 
 
+@skip_if_not_nvidia
+@skip_if_no_native_cuda_ext
 def test_nvidia_platform_keeps_native_cuda_semantics():
+    pytest.importorskip("vllm._C_stable_libtorch", exc_type=ImportError)
     from vllm.platforms import PlatformEnum
     from vllm.platforms.cuda import CudaPlatform
 
@@ -94,7 +172,10 @@ def test_nvidia_platform_keeps_native_cuda_semantics():
     assert not platform.is_out_of_tree()
 
 
+@skip_if_not_nvidia
+@skip_if_no_native_cuda_ext
 def test_nvidia_platform_selects_target_version_worker_wrapper(monkeypatch):
+    pytest.importorskip("vllm._C_stable_libtorch", exc_type=ImportError)
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -121,7 +202,10 @@ def test_nvidia_platform_selects_target_version_worker_wrapper(monkeypatch):
     native_update.assert_called_once_with(vllm_config)
 
 
+@skip_if_not_nvidia
+@skip_if_no_native_cuda_ext
 def test_nvidia_platform_keeps_native_cuda_communication(monkeypatch):
+    pytest.importorskip("vllm._C_stable_libtorch", exc_type=ImportError)
     from unittest.mock import patch
 
     from vllm.platforms.cuda import CudaPlatform
@@ -154,7 +238,10 @@ def test_nvidia_platform_keeps_native_cuda_communication(monkeypatch):
     native_custom_allreduce.assert_called_once_with()
 
 
+@skip_if_not_nvidia
+@skip_if_no_native_cuda_ext
 def test_nvidia_platform_uses_flagcx_when_configured(monkeypatch):
+    pytest.importorskip("vllm._C_stable_libtorch", exc_type=ImportError)
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -187,7 +274,10 @@ def test_nvidia_platform_uses_flagcx_when_configured(monkeypatch):
     native_update.assert_called_once_with(vllm_config)
 
 
+@skip_if_not_nvidia
+@skip_if_no_native_cuda_ext
 def test_nvidia_platform_uses_native_attention_by_default(monkeypatch):
+    pytest.importorskip("vllm._C_stable_libtorch", exc_type=ImportError)
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -209,7 +299,10 @@ def test_nvidia_platform_uses_native_attention_by_default(monkeypatch):
     native_select.assert_called_once_with(None, selector, 32)
 
 
+@skip_if_not_nvidia
+@skip_if_no_native_cuda_ext
 def test_nvidia_platform_honors_explicit_flaggems_attention(monkeypatch):
+    pytest.importorskip("vllm._C_stable_libtorch", exc_type=ImportError)
     from types import SimpleNamespace
     from unittest.mock import patch
 
