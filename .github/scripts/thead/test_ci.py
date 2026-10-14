@@ -4,11 +4,16 @@
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,6 +27,8 @@ from config import resolve_config
 from run_gate import (
     CHECKS,
     SCENARIOS,
+    local_models,
+    loopback_environment,
     parse_graph_observations,
     validate_documents,
 )
@@ -58,6 +65,70 @@ class IsolatedEntryTests(unittest.TestCase):
         self.assertEqual(json.loads(stdout.getvalue()), facts)
         self.assertIn("INFO normal import check", stderr.getvalue())
         self.assertNotIn("INFO", stdout.getvalue())
+
+
+class LoopbackProxyTests(unittest.TestCase):
+    def test_readiness_reaches_local_server_despite_runner_proxy(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                # Direct requests use a path; proxy requests use an absolute URL.
+                if self.path != "/v1/models":
+                    self.send_error(503, "Proxy rejects loopback requests")
+                    return
+                body = b'{"data": [{"id": "thead-ci-model"}]}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            port = server.server_port
+            proxy = f"http://127.0.0.1:{port}"
+            proxy_env = {
+                name: value
+                for name, value in os.environ.items()
+                if not name.lower().endswith("_proxy")
+            }
+            proxy_env["http_proxy"] = proxy
+            try:
+                with (
+                    patch.dict(os.environ, proxy_env, clear=True),
+                    patch.object(urllib.request, "_opener", None),
+                ):
+                    # This is the former readiness call under the failing CI env.
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        urllib.request.urlopen(proxy + "/v1/models", timeout=3)
+                    self.assertEqual(error.exception.code, 503)
+                    error.exception.close()
+                    self.assertEqual(
+                        local_models(port), {"data": [{"id": "thead-ci-model"}]}
+                    )
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_child_environment_preserves_proxy_and_bypass_entries(self):
+        original = {
+            "HTTP_PROXY": "http://proxy.example:3128",
+            "https_proxy": "http://secure-proxy.example:3128",
+            "NO_PROXY": "internal.example,127.0.0.1",
+            "no_proxy": "localhost,.svc",
+            "UNCHANGED": "value",
+        }
+        env = loopback_environment(original)
+        expected = "internal.example,127.0.0.1,localhost,.svc"
+        self.assertEqual(env["NO_PROXY"], expected)
+        self.assertEqual(env["no_proxy"], expected)
+        for key in ("HTTP_PROXY", "https_proxy", "UNCHANGED"):
+            self.assertEqual(env[key], original[key])
+        self.assertEqual(original["NO_PROXY"], "internal.example,127.0.0.1")
+        self.assertEqual(loopback_environment({})["no_proxy"], "127.0.0.1,localhost")
+        self.assertEqual(loopback_environment(env), env)
 
 
 class VllmProviderTests(unittest.TestCase):

@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -133,6 +134,27 @@ def owned_listener(process, port):
     raise RuntimeError("Ready endpoint belongs to another process")
 
 
+def loopback_environment(source):
+    """Keep runner proxy settings while bypassing them for the local Gate."""
+    env = dict(source)
+    entries = [
+        entry.strip()
+        for name in ("NO_PROXY", "no_proxy")
+        for entry in env.get(name, "").split(",")
+        if entry.strip()
+    ]
+    bypass = ",".join(dict.fromkeys([*entries, "127.0.0.1", "localhost"]))
+    env.update(NO_PROXY=bypass, no_proxy=bypass)
+    return env
+
+
+def local_models(port):
+    # The readiness probe is always local; never send it through runner proxies.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(f"http://127.0.0.1:{port}/v1/models", timeout=3) as response:
+        return json.load(response)
+
+
 def check_server(process, logs):
     if process.poll() is not None:
         raise RuntimeError(
@@ -169,7 +191,7 @@ def main():
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
-    env = dict(os.environ)
+    env = loopback_environment(os.environ)
     env.pop("FL_BACKEND", None)
     env.update(
         MODEL_PATH=str(args.model.resolve()),
@@ -235,18 +257,27 @@ def main():
         while time.monotonic() < deadline:
             check_server(process, logs)
             try:
-                with urllib.request.urlopen(
-                    f"http://127.0.0.1:{port}/v1/models", timeout=3
-                ) as response:
-                    doc = json.load(response)
+                doc = local_models(port)
                 if any(row["id"] == env["SERVED_MODEL_NAME"] for row in doc["data"]):
                     summary["ready_owned_listener"] = owned_listener(process, port)
                     ready = True
                     break
-            except (OSError, ValueError, KeyError):
+                summary["last_readiness_error"] = {"type": "UnexpectedModelList"}
+            except (OSError, ValueError, KeyError) as exc:
+                # Retain useful diagnostics without proxy URLs or credentials.
+                error = {"type": type(exc).__name__}
+                if isinstance(exc, urllib.error.HTTPError):
+                    error["http_status"] = exc.code
+                reason = getattr(exc, "reason", exc)
+                if isinstance(reason, OSError) and reason.errno is not None:
+                    error["errno"] = reason.errno
+                summary["last_readiness_error"] = error
                 time.sleep(1)
         if not ready:
-            raise RuntimeError("Own model server readiness timeout")
+            raise RuntimeError(
+                "Own model server readiness timeout: "
+                + json.dumps(summary.get("last_readiness_error", {}))
+            )
         print(f"Gate server ready: model={args.model} mode={args.mode}", flush=True)
         receipts = []
         summary["pytest_receipts"] = receipts

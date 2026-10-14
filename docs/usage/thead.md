@@ -53,21 +53,27 @@ export PPU_IMAGE="harbor.baai.ac.cn/plugin/vllm-plugin-fl@sha256:fc75bd7811813ac
 
 The corresponding tag is `v0.28.0-thead-ci-20261009`. The image includes vendor
 PyTorch, the PPU SDK and `flash_attn_3`, plus the repaired stack in the table.
-The validated host reported the following versions through `ppu-smi`:
+The following versions were confirmed on 2026-10-14 on the same host and
+container used for model acceptance. SDK/runtime versions come from the
+container; VBIOS was checked on all four reserved host cards (12–15).
 
-| Host component | Tested version |
+| Component | Recorded version |
 |---|---|
+| Host kernel | `5.10.134-013.13.4.kangaroo.al8.x86_64` |
 | PPU driver | `1.3.2-d7f5a2` |
 | PPU-SMI | `1.28` |
 | HGGC | `13.0` |
-| Host kernel, device firmware, standalone PPU SDK release | Not recorded in the saved validation evidence |
+| PPU SDK | `2.1.0-a5f865` |
+| clang | `13.0.1 (2.1.0-a5f865)` |
+| HGGC Driver / Runtime | `4.2` / `3.0` |
+| PCCL | `2.1.0` |
+| VBIOS (host cards 12–15) | `1.6.12-af69f0` |
 
-These identify the tested combination, not minimum supported versions. The
-saved records do not establish a supported kernel/firmware range or a standalone
-SDK release; the exact vendor base build is identified in section 3. Obtain the
-host compatibility matrix from the hardware provider before using a different
-stack. Record `uname -r`, the firmware report from the vendor utility, and the
-SDK release metadata when validating another host.
+These identify the recorded acceptance environment, not minimum supported
+versions or a kernel/firmware compatibility range. The exact vendor base build
+and PyTorch/FA3 build identities are recorded in section 3. Keep that SDK,
+PyTorch backend, and FA3 build together; obtain the hardware provider's
+compatibility matrix before using a different combination.
 
 The packaged payload passed normal imports and a nine-call numerical smoke in
 a separate container without the old build-workspace mounts. The published
@@ -79,12 +85,15 @@ passed package verification, GPU unit tests, and all four model Gate modes.
 docker version
 uname -r
 /usr/local/PPU_SDK/ppu-smi/bin/ppu-smi
-# Use the vendor utility's supported query to record firmware versions.
-/usr/local/PPU_SDK/ppu-smi/bin/ppu-smi --help
-# Locate the SDK's release/version manifest and retain its contents.
-find /usr/local/PPU_SDK -maxdepth 3 -type f \
-    \( -iname '*version*' -o -iname '*release*' \) -print
+# Record the selected host card's details, including VBIOS; change its index as needed.
+/usr/local/PPU_SDK/ppu-smi/bin/ppu-smi -q -i 12
 ls -l /dev/alixpu /dev/alixpu_ctl /dev/alixpu_ppu*
+```
+
+Inside the inference container, record its SDK and runtime module versions:
+
+```bash
+/usr/local/PPU_SDK/ppu-smi/bin/ppu-smi -q -d VERSION
 ```
 
 Use `ppu-smi` to check utilization, allocated memory, and owning processes.
@@ -169,6 +178,7 @@ version strings:
 |---|---|
 | PyTorch | `torch-2.10.0-cp312-cp312-linux_x86_64.whl`; wheel SHA256 `9583af61316841ba1b1f8c3eb3c5e8fd2102b05ef934c0263b3520581326c4ad` |
 | PyTorch native extension | `torch/_C.cpython-312-x86_64-linux-gnu.so`; SHA256 `7cb47fd88a702f6d724a784dc1b08e6bb572cd785f1bc70091d62975ad0c7d17` |
+| PPU backend extension | `acext==1.0.0`; `lib/libacext.so` SHA256 `8d1788d3a04fb3f40ff39eff08e2e41b17b47410ed0df1770bce84dcd5c433d8` |
 | PPU FlashAttention | Distribution `flash-attn-3==3.0.0b1`; `flash_attn_3/_C.abi3.so` SHA256 `5543e2443de27f42bee8345ca1cb09a391ea4bc2fa4ad1d79058b13469a344c2` |
 
 Use the prepared image digest in section 1 to reproduce these vendor artifacts,
