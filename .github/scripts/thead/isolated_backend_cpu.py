@@ -1,18 +1,18 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
-"""CPU numeric contracts for the complete current TheadBackend implementation.
+"""CPU contracts for the shared reference operators selected by THead policy.
 
-The fixture deliberately isolates parent-package initialization: normal
-vllm_fl imports initialize FlagGems, whose accelerator autotuner cannot start in
-this no-device environment. It executes the original complete Backend,
-TheadBackend and reference activation modules, and replaces no numeric code.
-This suite does not test plugin startup, dispatch registration or device kernels.
-Source revision and byte bindings belong to the external run manifest so future
-implementation fixes do not require changing permanent test-source hash literals.
+The fixture isolates accelerator-dependent package initialization and device
+configuration discovery. It executes the real registry, policy parser, dispatch
+manager, backend registrations and reference math. Numeric code is not replaced.
+The explicit registry tests dispatch selection and failure fallback, but does not
+claim coverage of plugin startup, hardware discovery or device kernels.
 """
 
+import functools
 import importlib
 import importlib.machinery
 import math
+import os
 import struct
 import sys
 from pathlib import Path
@@ -51,26 +51,50 @@ def backend():
                 name, loader=None, is_package=True
             )
             sys.modules[name] = package
-        base = importlib.import_module("vllm_fl.dispatch.backends.base")
-        module = importlib.import_module("vllm_fl.dispatch.backends.vendor.thead.thead")
-        activation = importlib.import_module(
-            "vllm_fl.dispatch.backends.reference.impl.activation"
-        )
-        assert (
-            Path(module.__file__).resolve()
-            == ROOT / "vllm_fl/dispatch/backends/vendor/thead/thead.py"
-        )
-        assert module.TheadBackend.__bases__ == (base.Backend,)
-        for name in ["rms_norm", "rotary_embedding", "silu_and_mul"]:
-            assert (
-                Path(getattr(module.TheadBackend, name).__code__.co_filename).resolve()
-                == Path(module.__file__).resolve()
+        # The explicit YAML policy bypasses hardware configuration discovery.
+        # Raising here prevents the stub from silently choosing a different policy.
+        utils = ModuleType("vllm_fl.utils")
+
+        def reject_device_discovery():
+            raise AssertionError(
+                "CPU dispatch tests must use the explicit THead policy"
             )
-        assert (
-            Path(activation.__file__).resolve()
-            == ROOT / "vllm_fl/dispatch/backends/reference/impl/activation.py"
+
+        utils.get_op_config = reject_device_discovery
+        sys.modules[utils.__name__] = utils
+        registry_module = importlib.import_module("vllm_fl.dispatch.registry")
+        policy_module = importlib.import_module("vllm_fl.dispatch.policy")
+        manager_module = importlib.import_module("vllm_fl.dispatch.manager")
+        reference = importlib.import_module(
+            "vllm_fl.dispatch.backends.reference.register_ops"
         )
-        yield module.TheadBackend()
+        thead = importlib.import_module(
+            "vllm_fl.dispatch.backends.vendor.thead.register_ops"
+        )
+        op_types = importlib.import_module("vllm_fl.dispatch.types")
+        policy = policy_module.policy_from_config(
+            str(ROOT / "vllm_fl/dispatch/config/thead.yaml")
+        )
+
+        def make_manager():
+            registry = registry_module.OpRegistry()
+            reference.register_builtins(registry)
+            thead.register_builtins(registry)
+            manager = manager_module.OpManager(registry)
+            # Registration above is intentional: hardware/plugin discovery is
+            # outside this isolated test, while selection and call stay real.
+            manager._state.initialized = True
+            manager._state.init_pid = os.getpid()
+            return manager
+
+        manager = make_manager()
+        backend = SimpleNamespace(
+            make_manager=make_manager, policy=policy, op_types=op_types
+        )
+        for op_name in ("rms_norm", "rotary_embedding", "silu_and_mul"):
+            setattr(backend, op_name, functools.partial(manager.call, op_name))
+        with policy_module.policy_context(policy):
+            yield backend
     finally:
         for name in list(sys.modules):
             if name == "vllm_fl" or name.startswith("vllm_fl."):
@@ -141,7 +165,7 @@ def _rms_oracle(x, residual, weight, epsilon, variance_size, weighted):
     [(True, True), (False, True), (True, False), (False, False)],
 )
 @pytest.mark.parametrize("variance_size", [None, 3])
-def test_actual_backend_rms_mixed_dtype_residual_flags_variance(
+def test_reference_dispatch_rms_mixed_dtype_residual_flags_variance(
     backend,
     x_dtype,
     weight_dtype,
@@ -241,7 +265,7 @@ def _rotary_oracle(tensor, cos, sin, positions, interleaved):
 @pytest.mark.parametrize("interleaved", [False, True], ids=["neox", "gptj"])
 @pytest.mark.parametrize("inplace", [False, True])
 @pytest.mark.parametrize("partial_tail", [False, True])
-def test_actual_backend_rotary_layout_style_inplace_caller_view_tail(
+def test_reference_dispatch_rotary_layout_style_inplace_caller_view_tail(
     backend, dtype, layout, interleaved, inplace, partial_tail
 ):
     rotary_size = 8
@@ -276,8 +300,9 @@ def test_actual_backend_rotary_layout_style_inplace_caller_view_tail(
         [[0, 4, 1, 3], [6, 2, 5, 0]] if layout == "4d_batched" else [0, 4, 1, 3],
         dtype=torch.int64,
     )
-    # The FL caller passes the rotary prefix view. The direct backend method must
-    # rotate that view and leave the backing tensor's unpassed tail unchanged.
+    # The FL caller passes the rotary prefix view and uses the returned tensors.
+    # Reference dispatch keeps its existing out-of-place contract for either
+    # inplace argument, including when the input is a view with an unpassed tail.
     qview, kview = query[..., :rotary_size], key[..., :rotary_size]
     expected_q = _rotary_oracle(qview, cos, sin, positions, interleaved)
     expected_k = _rotary_oracle(kview, cos, sin, positions, interleaved)
@@ -298,15 +323,12 @@ def test_actual_backend_rotary_layout_style_inplace_caller_view_tail(
         actual_q.dtype == actual_k.dtype == dtype
         and actual_q.device.type == actual_k.device.type == "cpu"
     )
-    if inplace:
-        assert actual_q is qview and actual_k is kview
-    else:
-        assert (
-            actual_q.data_ptr() != qview.data_ptr()
-            and actual_k.data_ptr() != kview.data_ptr()
-        )
-        torch.testing.assert_close(query, before_q, rtol=0, atol=0)
-        torch.testing.assert_close(key, before_k, rtol=0, atol=0)
+    assert (
+        actual_q.data_ptr() != qview.data_ptr()
+        and actual_k.data_ptr() != kview.data_ptr()
+    )
+    torch.testing.assert_close(query, before_q, rtol=0, atol=0)
+    torch.testing.assert_close(key, before_k, rtol=0, atol=0)
     if partial_tail:
         torch.testing.assert_close(
             query[..., rotary_size:], before_q[..., rotary_size:], rtol=0, atol=0
@@ -318,7 +340,7 @@ def test_actual_backend_rotary_layout_style_inplace_caller_view_tail(
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("shape", [(3, 16), (2, 3, 16)])
-def test_actual_backend_silu_numeric_oracle(backend, dtype, shape):
+def test_reference_dispatch_silu_numeric_oracle(backend, dtype, shape):
     x = (
         torch.linspace(-4.25, 3.75, math.prod(shape) * 2)
         .reshape(shape[:-1] + (shape[-1] * 2,))[..., ::2]
@@ -347,7 +369,7 @@ def test_actual_backend_silu_numeric_oracle(backend, dtype, shape):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("with_residual", [False, True])
-def test_actual_backend_rms_defaults_apply_weight(backend, dtype, with_residual):
+def test_reference_dispatch_rms_defaults_apply_weight(backend, dtype, with_residual):
     x = torch.tensor(
         [[0.31, -1.27, 2.43, -0.57], [1.11, 0.43, -0.89, 1.91]], dtype=dtype
     )
@@ -370,3 +392,66 @@ def test_actual_backend_rms_defaults_apply_weight(backend, dtype, with_residual)
     torch.testing.assert_close(output, expected, rtol=rtol, atol=atol)
     if with_residual:
         torch.testing.assert_close(actual[1], expected_residual, rtol=0, atol=0)
+
+
+def test_thead_registers_only_vendor_attention(backend):
+    manager = backend.make_manager()
+    vendor_ops = {
+        op_name
+        for op_name, impls in manager.registry.snapshot().impls_by_op.items()
+        if any(impl.impl_id == "vendor.thead" for impl in impls)
+    }
+    assert vendor_ops == {"attention_backend"}
+    assert backend.policy.get_per_op_order("attention_backend")[0] == "vendor:thead"
+    for op_name in ("rms_norm", "rotary_embedding", "silu_and_mul"):
+        assert backend.policy.get_per_op_order(op_name) == ["flagos", "reference"]
+        assert manager.get_selected_impl_id(op_name) == "reference.torch"
+
+
+@pytest.mark.parametrize("op_name", ["rms_norm", "rotary_embedding", "silu_and_mul"])
+@pytest.mark.parametrize("flagos_state", ["available", "unavailable", "raises"])
+def test_thead_dispatch_prefers_flagos_and_falls_back_to_reference(
+    backend, op_name, flagos_state
+):
+    manager = backend.make_manager()
+    calls = []
+    sentinel = object()
+
+    def flagos_impl(*args, **kwargs):
+        calls.append(op_name)
+        if flagos_state == "raises":
+            raise NotImplementedError("unsupported test input")
+        return sentinel
+
+    flagos_impl._is_available = lambda: flagos_state != "unavailable"
+    manager.registry.register_impl(
+        backend.op_types.OpImpl(
+            op_name=op_name,
+            impl_id="default.flagos",
+            kind=backend.op_types.BackendImplKind.DEFAULT,
+            priority=backend.op_types.BackendPriority.DEFAULT,
+            fn=flagos_impl,
+        )
+    )
+    if op_name == "rms_norm":
+        x = torch.ones(2, 4)
+        args = (SimpleNamespace(weight=torch.ones(4), variance_epsilon=0.0), x)
+        expected = x
+    elif op_name == "rotary_embedding":
+        query, key = torch.ones(2, 3, 4), torch.full((2, 1, 4), 2.0)
+        args = (None, query, key, torch.ones(2, 2), torch.zeros(2, 2), torch.arange(2))
+        expected = (query, key)
+    else:
+        args = (None, torch.zeros(2, 8))
+        expected = torch.zeros(2, 4)
+    actual = manager.call(op_name, *args)
+    if flagos_state == "available":
+        assert actual is sentinel and calls == [op_name]
+    else:
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert calls == ([op_name] if flagos_state == "raises" else [])
+        if flagos_state == "raises":
+            assert manager.get_failed_impls(op_name) == {op_name: {"default.flagos"}}
+            # A failed kernel is not retried on every subsequent call.
+            torch.testing.assert_close(manager.call(op_name, *args), expected)
+            assert calls == [op_name]

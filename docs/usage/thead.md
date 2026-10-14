@@ -37,7 +37,9 @@ source hashes separately.
 
 The T-Head policy is loaded from
 [`vllm_fl/dispatch/config/thead.yaml`](../../vllm_fl/dispatch/config/thead.yaml).
-Keep the plugin and this policy together. Text paged attention uses the vendor
+Keep the plugin and this policy together. SiLU, RMSNorm, and rotary embedding
+use FlagGems followed by the shared PyTorch reference backend. Only attention
+has a T-Head vendor registration. Text paged attention uses the vendor
 `flash_attn_3` bridge; the vision encoder also needs the corrected FlagGems
 SDPA path. Passing text attention tests alone does not validate image inference.
 
@@ -51,17 +53,37 @@ export PPU_IMAGE="harbor.baai.ac.cn/plugin/vllm-plugin-fl@sha256:fc75bd7811813ac
 
 The corresponding tag is `v0.28.0-thead-ci-20261009`. The image includes vendor
 PyTorch, the PPU SDK and `flash_attn_3`, plus the repaired stack in the table.
-Obtain matching host driver instructions from the hardware provider.
+The validated host reported the following versions through `ppu-smi`:
+
+| Host component | Tested version |
+|---|---|
+| PPU driver | `1.3.2-d7f5a2` |
+| PPU-SMI | `1.28` |
+| HGGC | `13.0` |
+| Host kernel, device firmware, standalone PPU SDK release | Not recorded in the saved validation evidence |
+
+These identify the tested combination, not minimum supported versions. The
+saved records do not establish a supported kernel/firmware range or a standalone
+SDK release; the exact vendor base build is identified in section 3. Obtain the
+host compatibility matrix from the hardware provider before using a different
+stack. Record `uname -r`, the firmware report from the vendor utility, and the
+SDK release metadata when validating another host.
 
 The packaged payload passed normal imports and a nine-call numerical smoke in
 a separate container without the old build-workspace mounts. The published
-digest and anonymous registry metadata were verified. GPU execution after
-pulling this final digest has not yet been validated; the CI job checks that
-artifact on the configured PPU runner.
+digest and anonymous registry metadata were verified. The
+[T-Head CI run on this digest](https://github.com/flagos-ai/vllm-plugin-FL/actions/runs/38226266996/job/114735108252)
+passed package verification, GPU unit tests, and all four model Gate modes.
 
 ```bash
 docker version
+uname -r
 /usr/local/PPU_SDK/ppu-smi/bin/ppu-smi
+# Use the vendor utility's supported query to record firmware versions.
+/usr/local/PPU_SDK/ppu-smi/bin/ppu-smi --help
+# Locate the SDK's release/version manifest and retain its contents.
+find /usr/local/PPU_SDK -maxdepth 3 -type f \
+    \( -iname '*version*' -o -iname '*release*' \) -print
 ls -l /dev/alixpu /dev/alixpu_ctl /dev/alixpu_ppu*
 ```
 
@@ -136,9 +158,23 @@ Then skip the remaining manual installation commands in this section and
 continue with section 4. The image's `/opt/thead/bin/runtime-entrypoint`
 initializes the same environment before executing a command.
 
-The remaining commands are for preparing a custom vendor image. Rebuild only
-when creating a new environment; the repair script intentionally rejects
-already changed preimages.
+The remaining commands are for preparing a custom vendor image. The validated
+vendor base was
+`egslingjun-registry.cn-wulanchabu.cr.aliyuncs.com/egslingjun/inference-xpu-pytorch:26.04-v2.1.0-vllm0.23.0-torch2.10-cu130-20260710`.
+Keep that vendor build's PyTorch backend and SDK together. The following build
+identifiers distinguish its vendor packages from public wheels with the same
+version strings:
+
+| Vendor package | Tested build identity |
+|---|---|
+| PyTorch | `torch-2.10.0-cp312-cp312-linux_x86_64.whl`; wheel SHA256 `9583af61316841ba1b1f8c3eb3c5e8fd2102b05ef934c0263b3520581326c4ad` |
+| PyTorch native extension | `torch/_C.cpython-312-x86_64-linux-gnu.so`; SHA256 `7cb47fd88a702f6d724a784dc1b08e6bb572cd785f1bc70091d62975ad0c7d17` |
+| PPU FlashAttention | Distribution `flash-attn-3==3.0.0b1`; `flash_attn_3/_C.abi3.so` SHA256 `5543e2443de27f42bee8345ca1cb09a391ea4bc2fa4ad1d79058b13469a344c2` |
+
+Use the prepared image digest in section 1 to reproduce these vendor artifacts,
+or obtain the matching base image and packages from the hardware provider.
+Rebuild only when creating a new environment; the repair script intentionally
+rejects already changed preimages.
 
 For a fresh installation, create a private environment that can read the
 vendor's system packages. The path below is an example, not a required
@@ -471,25 +507,18 @@ The packaged `run_test.sh` also waits for readiness and runs all three files;
 use it when its `pytest` executable belongs to the intended environment.
 Each model/mode sends 26 requests: 1 text, 8 concurrent text, 1 image,
 8 concurrent image, and 8 mixed requests. It evaluates 260 response checks.
-Quality oracle `2.2-llm-concepts` keeps ten checks per response. The free-form
-LLM explanation requires model, training, and inference concepts in order,
-followed by affirmative descriptions of at least two distinct limitations
-(for example, hallucination and bias). This avoids requiring the literal word
-`limitations` when the response already explains those concepts. Evidence
-spans are saved in the JSON results. Exact answer/OCR checks for other requests
-and all length, repetition, and encoding checks are preserved. Version 2.2
-uses a common affirmative list grammar for including, such as, that/which
-include/involve, and colon forms. A finite predicate must introduce the list
-or follow it as persist/remain. Bare headings, negated predicates, and positive
-capability words are rejected; reasoning and knowledge need a defect description.
-Historical CI results retain their original oracle version.
+The workflow runs the shared Gate files without changing their prompts,
+images, keyword checks, or thresholds. The detailed LLM introduction must
+contain at least 256 characters and the required terms in order; the other
+requests retain their exact answer/OCR checks. All ten checks must pass for
+every response, including repetition, encoding, and control-character checks.
 
 ## CI configuration
 
 The reusable workflow is [`.github/workflows/_thead_test.yml`](../../.github/workflows/_thead_test.yml).
 It uses the same configuration loader as the other platforms, with
 [the T-Head configuration](../../.github/configs/thead.yml). Use the published
-digest below and reserve four PPU cards on a registered runner. Device mounts
+named, digest-pinned image below and reserve four PPU cards on a registered runner. Device mounts
 grant access; they do not reserve cards or prove that the cards are idle.
 
 The versioned THead configuration supplies the approved image, runner, four
@@ -500,7 +529,7 @@ same validation:
 
 | Variable | Value |
 |---|---|
-| `THEAD_CI_IMAGE` | `harbor.baai.ac.cn/plugin/vllm-plugin-fl@sha256:fc75bd7811813ac824773f4719a76821e749f5f30ecb3f22fe7fc07bb7a107bb` |
+| `THEAD_CI_IMAGE` | `harbor.baai.ac.cn/plugin/vllm-plugin-fl:v0.28.0-thead-ci-20261009@sha256:fc75bd7811813ac824773f4719a76821e749f5f30ecb3f22fe7fc07bb7a107bb` |
 | `THEAD_CI_VISIBLE_DEVICES` | Exactly four distinct, exclusively reserved PPU indices, comma-separated |
 | `THEAD_CI_MODEL_27B` | Absolute container path to the complete `Qwen3.8-27B` model |
 | `THEAD_CI_MODEL_35B` | Absolute container path to the complete `Qwen3.6-35B-A3B` model |
@@ -549,7 +578,7 @@ Gate starts its own server, verifies readiness, executes the original Gate
 files, records all 26 requests/260 checks, and cleans up its own process group
 before the next model/mode. Graph mode also requires graph-execution evidence.
 
-The unit runner requires 202 isolated backend CPU tests, 5 CPU cache tests,
+The unit runner requires 212 isolated backend CPU tests, 5 CPU cache tests,
 and 45 native PPU cache/attention tests, with zero skips. The isolated backend
 CPU fixture lives at
 [`.github/scripts/thead/isolated_backend_cpu.py`](../../.github/scripts/thead/isolated_backend_cpu.py)
@@ -562,7 +591,7 @@ JSON results, source/provider snapshots, and complete logs.
 ## Recorded acceptance
 
 The repaired stack above passed the following serial TP4 matrix on
-2026-10-09, before quality oracle `2-llm-concepts`:
+2026-10-09 with the original shared Gate checks:
 
 | Model | Eager requests | Graph requests |
 |---|---:|---:|

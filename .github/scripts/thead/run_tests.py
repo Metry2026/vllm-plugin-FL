@@ -20,7 +20,7 @@ validate_junit = _common.validate_junit
 
 REPO = Path(__file__).resolve().parents[3]
 SUITES = (
-    ("cpu-backend", 202, [".github/scripts/thead/isolated_backend_cpu.py"]),
+    ("cpu-backend", 212, [".github/scripts/thead/isolated_backend_cpu.py"]),
     (
         "cpu-cache",
         5,
@@ -53,8 +53,8 @@ def main():
         env = dict(os.environ)
         env.pop("FL_BACKEND", None)
         env.update(PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", PYTHONDONTWRITEBYTECODE="1")
-        # The full-class CPU fixture deliberately isolates package parents. It
-        # runs in a separate process and is not evidence of normal registration.
+        # The CPU fixture exercises explicit registry/policy routing with device
+        # discovery isolated. Normal plugin startup is checked separately.
         if label == "cpu-backend":
             env.update(CUDA_VISIBLE_DEVICES="", TORCH_DEVICE_BACKEND_AUTOLOAD="0")
         junit = args.output_dir / (label + ".xml")
@@ -99,7 +99,7 @@ def main():
             "suites": results,
             "gpu_pytest_expected": 45,
             "cpu_cache_expected": 5,
-            "isolated_backend_cpu_expected": 202,
+            "isolated_backend_cpu_expected": 212,
             "tensor_aot_metadata_required": False,
             "external_fa3_oracle_24_and_gdn_72_included": False,
         },

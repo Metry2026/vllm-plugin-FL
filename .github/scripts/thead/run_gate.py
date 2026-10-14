@@ -1,5 +1,5 @@
 # Copyright 2026 FlagOS Contributors
-"""Run the 26-request adaptation Gate with the versioned quality oracle."""
+"""Run the unchanged 26-request shared adaptation Gate."""
 
 import argparse
 import importlib.util
@@ -28,12 +28,6 @@ validate_junit = _common.validate_junit
 
 REPO = Path(__file__).resolve().parents[3]
 CASES = REPO / "tools/adaptation-gate-cases"
-_quality_spec = importlib.util.spec_from_file_location(
-    "_thead_gate_quality", CASES / "gate_quality.py"
-)
-_quality = importlib.util.module_from_spec(_quality_spec)
-_quality_spec.loader.exec_module(_quality)
-QUALITY_ORACLE_VERSION = _quality.ORACLE_VERSION
 
 SCENARIOS = {
     "text_single": 1,
@@ -65,10 +59,6 @@ def validate_documents(directory):
     passed = requests = checks = passed_checks = 0
     for scenario, expected in SCENARIOS.items():
         doc = by_scenario[scenario]
-        if doc.get("quality_oracle_version") != QUALITY_ORACLE_VERSION:
-            raise RuntimeError(
-                "Missing or mismatched quality oracle version: " + scenario
-            )
         if len(doc["input"]) != expected or len(doc["output"]) != expected:
             raise RuntimeError("Logical request count changed: " + scenario)
         for row in doc["output"]:
@@ -87,9 +77,6 @@ def validate_documents(directory):
         "passed_checks": passed_checks,
         "passed_requests": passed,
         "passed": requests == 26 and checks == 260 and passed == 26,
-        "quality_oracle_version": QUALITY_ORACLE_VERSION,
-        "llm_explanation_profile": _quality.LLM_EXPLANATION_PROFILE,
-        "other_tasks_use_exact_required_terms": True,
     }
 
 
@@ -174,7 +161,6 @@ def main():
         "mode": args.mode,
         "server_process_started": False,
         "Gate_pass": False,
-        "quality_oracle_version": QUALITY_ORACLE_VERSION,
         "errors": [],
         "upstream_declared_torch_2_13_requirement_satisfied": False,
     }

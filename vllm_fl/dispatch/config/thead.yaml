@@ -33,15 +33,12 @@ op_backends:
     - reference
   rms_norm:
     - flagos
-    - vendor
     - reference
   silu_and_mul:
     - flagos
-    - vendor
     - reference
   rotary_embedding:
     - flagos
-    - vendor
     - reference
 
 # FlagOS operator blacklist

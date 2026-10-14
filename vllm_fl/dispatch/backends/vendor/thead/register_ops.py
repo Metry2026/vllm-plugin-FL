@@ -28,8 +28,8 @@ def register_builtins(registry) -> None:
     """
     Register all thead (PPU) VENDOR operator implementations.
 
-    At registration time we also load the flash_attn_3 wheel so that
-    TheadFlashAttentionBackend can call FA3 ops.
+    Only attention is vendor-specific. Shared operators are registered by
+    the FlagGems and reference backends; the FA3 wheel is loaded lazily.
 
     Args:
         registry: Registry to register into
@@ -40,30 +40,6 @@ def register_builtins(registry) -> None:
     is_avail = backend.is_available
 
     impls = [
-        OpImpl(
-            op_name="silu_and_mul",
-            impl_id="vendor.thead",
-            kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(backend.silu_and_mul, is_avail),
-            vendor="thead",
-            priority=BackendPriority.VENDOR,
-        ),
-        OpImpl(
-            op_name="rms_norm",
-            impl_id="vendor.thead",
-            kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(backend.rms_norm, is_avail),
-            vendor="thead",
-            priority=BackendPriority.VENDOR,
-        ),
-        OpImpl(
-            op_name="rotary_embedding",
-            impl_id="vendor.thead",
-            kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(backend.rotary_embedding, is_avail),
-            vendor="thead",
-            priority=BackendPriority.VENDOR,
-        ),
         OpImpl(
             op_name="attention_backend",
             impl_id="vendor.thead",

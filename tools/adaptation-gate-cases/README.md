@@ -31,8 +31,7 @@ Each mode runs the following scenarios:
   eight concurrent short requests.
 - `test_image.py`: one OCR request and eight concurrent image requests.
 - `test_mix_text_image.py`: eight concurrent requests, four text and four image.
-- `case_utils.py`: requests, concurrency, and JSON reports.
-- `gate_quality.py`: versioned response checks and semantic evidence spans.
+- `case_utils.py`: requests, concurrency, quality checks, and JSON reports.
 - `generate_images.py`: regenerates the eight deterministic PNG fixtures.
 
 The image fixtures cover quadrant colors, shape ordering, shape counting, OCR
@@ -139,25 +138,6 @@ Responses must contain the expected semantic answer and must not contain empty
 output, `!!!`, mojibake, control characters, suspicious character runs, or
 repeated words or phrases. The detailed LLM introduction must also contain at
 least 256 characters. Number words and digits are treated as equivalent.
-
-Quality oracle `2.2-llm-concepts` uses the explicit `llm-explanation-v1` profile
-only for the detailed LLM introduction. It requires the model, training, and
-inference anchors in order, followed by affirmative descriptions of at least
-two distinct limitations: factual reliability, bias, understanding/reasoning,
-or knowledge freshness. A correct explanation need not contain the literal
-word `limitations`. Headings, denied limitations, and a single limitation do
-not satisfy this profile. JSON results record the oracle version and matching
-evidence spans for review. Version 2.2 uses one bounded affirmative list
-grammar: a limitation noun with an include/involve predicate, or a face/have
-predicate followed by including, such as, that/which include/involve, or a
-colon. A list followed by persist/remain also supplies a finite predicate.
-Connectors alone, denied statements, and positive capability words do not
-supply limitation evidence; reasoning and knowledge need a defect description.
-Historical results retain their original oracle version.
-
-Other requests retain their exact required-answer checks. Each request still
-has ten Boolean checks; the prompt, images, token budget, minimum length, and
-repetition/encoding checks are unchanged.
 
 Regenerate images with:
 
