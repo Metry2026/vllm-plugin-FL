@@ -578,15 +578,14 @@ Gate starts its own server, verifies readiness, executes the original Gate
 files, records all 26 requests/260 checks, and cleans up its own process group
 before the next model/mode. Graph mode also requires graph-execution evidence.
 
-The unit runner requires 212 isolated backend CPU tests, 5 CPU cache tests,
-and 45 native PPU cache/attention tests, with zero skips. The isolated backend
-CPU fixture lives at
-[`.github/scripts/thead/isolated_backend_cpu.py`](../../.github/scripts/thead/isolated_backend_cpu.py)
-and runs in its own pytest process, outside generic platform test discovery.
-It is separate from the normal provider/import check. The manual
-24-case FA3 oracle and 72 packed-GDN calls are additional numerical probes;
-the CI unit runner does not claim that coverage. Retain its JUnit, per-request
-JSON results, source/provider snapshots, and complete logs.
+The unit runner uses the existing
+[`tests/unit_tests/ops/test_numerical.py`](../../tests/unit_tests/ops/test_numerical.py)
+suite for shared reference operators, plus 5 CPU cache tests and 45 native PPU
+cache/attention tests, with zero skips. Reference tensors run on CPU using the
+normal package imports and the test suite's existing device fixture. Retain the
+JUnit reports, per-request JSON results, source/provider snapshots, and logs.
+The manual 24-case FA3 oracle and 72 packed-GDN calls are additional numerical
+probes outside the CI unit suite.
 
 ## Recorded acceptance
 

@@ -64,7 +64,7 @@ jobs:
       - name: Check normal PPU imports and the three-file upstream fix
         id: check
         run: bash .github/scripts/thead/check.sh
-      - name: Backend CPU and native PPU unit tests (zero skips)
+      - name: Shared reference and native PPU unit tests (zero skips)
         run: |
           "$THEAD_CI_PYTHON" -I -B .github/scripts/thead/run_tests.py --output-dir ci-results/unit
       - name: Model Gates, eager then graph, one model at a time
