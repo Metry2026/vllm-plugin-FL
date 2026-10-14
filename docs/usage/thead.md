@@ -45,14 +45,16 @@ SDPA path. Passing text attention tests alone does not validate image inference.
 
 ## 1. Check the host and vendor runtime
 
-Use the published runtime by immutable digest:
+Use the published runtime image:
 
 ```bash
-export PPU_IMAGE="harbor.baai.ac.cn/plugin/vllm-plugin-fl@sha256:fc75bd7811813ac824773f4719a76821e749f5f30ecb3f22fe7fc07bb7a107bb"
+export PPU_IMAGE="harbor.baai.ac.cn/plugin/vllm-plugin-fl:v0.28.0-thead-ci"
 ```
 
-The corresponding tag is `v0.28.0-thead-ci-20261009`. The image includes vendor
-PyTorch, the PPU SDK and `flash_attn_3`, plus the repaired stack in the table.
+For reproducibility, the accepted image was recorded as
+`harbor.baai.ac.cn/plugin/vllm-plugin-fl@sha256:fc75bd7811813ac824773f4719a76821e749f5f30ecb3f22fe7fc07bb7a107bb`.
+The image includes vendor PyTorch, the PPU SDK and `flash_attn_3`, plus the
+repaired stack in the table.
 The following versions were confirmed on 2026-10-14 on the same host and
 container used for model acceptance. SDK/runtime versions come from the
 container; VBIOS was checked on all four reserved host cards (12–15).
@@ -104,14 +106,14 @@ terminate them; retain the session logs and exit status.
 
 ## 2. Mount devices, source, and models
 
-`PPU_IMAGE` defaults to the published digest without replacing an existing
+`PPU_IMAGE` defaults to the versioned image tag without replacing an existing
 selection. Set it to your own vendor image when following the self-build path.
 `WORK_DIR` is persistent writable storage for environments, source builds,
 caches, and results. `MODEL_DIR` contains model directories with `config.json`
 and all weight shards.
 
 ```bash
-export PPU_IMAGE="${PPU_IMAGE:-harbor.baai.ac.cn/plugin/vllm-plugin-fl@sha256:fc75bd7811813ac824773f4719a76821e749f5f30ecb3f22fe7fc07bb7a107bb}"
+export PPU_IMAGE="${PPU_IMAGE:-harbor.baai.ac.cn/plugin/vllm-plugin-fl:v0.28.0-thead-ci}"
 export REPO_DIR="$PWD"
 export WORK_DIR=/data/thead-work
 export MODEL_DIR=/data/models
@@ -528,7 +530,7 @@ every response, including repetition, encoding, and control-character checks.
 The reusable workflow is [`.github/workflows/_thead_test.yml`](../../.github/workflows/_thead_test.yml).
 It uses the same configuration loader as the other platforms, with
 [the T-Head configuration](../../.github/configs/thead.yml). Use the published
-named, digest-pinned image below and reserve four PPU cards on a registered runner. Device mounts
+versioned image below and reserve four PPU cards on a registered runner. Device mounts
 grant access; they do not reserve cards or prove that the cards are idle.
 
 The versioned THead configuration supplies the approved image, runner, four
@@ -539,7 +541,7 @@ same validation:
 
 | Variable | Value |
 |---|---|
-| `THEAD_CI_IMAGE` | `harbor.baai.ac.cn/plugin/vllm-plugin-fl:v0.28.0-thead-ci-20261009@sha256:fc75bd7811813ac824773f4719a76821e749f5f30ecb3f22fe7fc07bb7a107bb` |
+| `THEAD_CI_IMAGE` | `harbor.baai.ac.cn/plugin/vllm-plugin-fl:v0.28.0-thead-ci` |
 | `THEAD_CI_VISIBLE_DEVICES` | Exactly four distinct, exclusively reserved PPU indices, comma-separated |
 | `THEAD_CI_MODEL_27B` | Absolute container path to the complete `Qwen3.8-27B` model |
 | `THEAD_CI_MODEL_35B` | Absolute container path to the complete `Qwen3.6-35B-A3B` model |
@@ -549,9 +551,10 @@ same validation:
 | `THEAD_CI_CONTAINER_OPTIONS` | Optional Docker options overriding the explicit device grants and shared-memory settings |
 
 The published image provides `/opt/thead/venv` and the complete repaired
-ordinary stack. Ensure that the runner can pull this digest and access the
+ordinary stack. Ensure that the runner can pull this image and access the
 configured model mounts. Keep any registry authentication in the runner/CI
-secret configuration. The workflow rejects a missing image digest, invalid
+secret configuration. The workflow accepts explicit v-version tags or SHA256
+digests and rejects missing or invalid image references, invalid
 card selection, and privileged container options, including invalid explicit
 overrides instead of silently using defaults.
 

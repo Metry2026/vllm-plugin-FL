@@ -18,9 +18,11 @@ def resolve_config(config, env):
         return value.strip()
 
     image = text_value("THEAD_CI_IMAGE", "ci_image")
-    if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", image):
+    if not re.fullmatch(
+        r"[^\s@]+(?::v[0-9][A-Za-z0-9_.-]*|@sha256:[0-9a-f]{64})", image
+    ):
         raise ValueError(
-            "THEAD_CI_IMAGE must be an existing OCI image pinned by digest"
+            "THEAD_CI_IMAGE must use an explicit v-version tag or sha256 digest"
         )
 
     def list_value(variable, key, default):

@@ -180,7 +180,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def versioned_resources(self):
         return {
-            "ci_image": "registry.example/ppu:v0.28.0-thead-ci@sha256:" + "b" * 64,
+            "ci_image": "registry.example/ppu:v0.28.0-thead-ci",
             "runner_labels": ["reserved-ppu"],
             "container_volumes": ["/model-store:/models:ro"],
             "container_options": "--device /dev/alixpu",
@@ -257,10 +257,15 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "THEAD_CI_IMAGE"):
             resolve_config(self.defaults, self.env)
 
-    def test_unpinned_image_fails(self):
-        self.env["THEAD_CI_IMAGE"] = "registry.example/ppu:latest"
-        with self.assertRaises(ValueError):
-            resolve_config(self.defaults, self.env)
+    def test_invalid_image_reference_fails(self):
+        for image in (
+            "registry.example/ppu:latest",
+            "registry.example/ppu",
+            "registry.example/ppu:v0.28.0 thead-ci",
+            "registry.example/ppu@sha256:abc",
+        ):
+            with self.subTest(image=image), self.assertRaises(ValueError):
+                resolve_config(self.defaults, dict(self.env, THEAD_CI_IMAGE=image))
 
     def test_duplicate_devices_and_privileged_fail(self):
         self.env["THEAD_CI_VISIBLE_DEVICES"] = "0,1,1,3"
