@@ -60,3 +60,7 @@ jobs:
         id: baseline
         continue-on-error: true
         run: timeout --kill-after=10s 180s torchrun --standalone --nproc_per_node=2 /tmp/h20_nccl_smoke.py
+      - name: Verify communication with NVLS disabled
+        env:
+          NCCL_NVLS_ENABLE: '0'
+        run: timeout --kill-after=10s 180s torchrun --standalone --nproc_per_node=2 /tmp/h20_nccl_smoke.py
