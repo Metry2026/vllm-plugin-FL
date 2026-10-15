@@ -7,60 +7,37 @@ permissions:
   contents: read
 
 jobs:
-  h20-nccl-diagnostic:
-    name: H20 NCCL diagnostic
-    runs-on: [vllm-plugin-ci-h20]
-    timeout-minutes: 12
-    container:
-      image: harbor.baai.ac.cn/plugin/vllm-plugin-fl:v0.28.0-cuda-ci
-      options: --privileged --gpus all --ipc=host --hostname vllm-plugin-fl --user root
-    env:
-      CUDA_VISIBLE_DEVICES: '0,1'
-      VLLM_PLUGINS: ''
-      NCCL_DEBUG: INFO
-      NCCL_DEBUG_SUBSYS: INIT,ENV,ALLOC,NVLS,GRAPH,SHM,P2P,NET
-      CUDA_DEVICE_MAX_CONNECTIONS: '1'
-      NCCL_ALGO: Ring
-    steps:
-      - name: Inspect hardware and libraries
-        run: |
-          nvidia-smi
-          nvidia-smi topo -m
-          python - <<'PY'
-          import torch, vllm
-          print('torch', torch.__version__, 'vllm', vllm.__version__)
-          print('torch NCCL', torch.cuda.nccl.version())
-          print('CUDA', torch.version.cuda)
-          PY
-      - name: Write minimal communication test
-        run: |
-          cat > /tmp/h20_nccl_smoke.py <<'PY'
-          import os
-          from datetime import timedelta
-          import torch
-          import torch.distributed as dist
-          from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-
-          rank = int(os.environ['LOCAL_RANK'])
-          torch.cuda.set_device(rank)
-          dist.init_process_group('gloo', timeout=timedelta(seconds=60))
-          print(f'rank={rank} initializing PyNcclCommunicator', flush=True)
-          comm = PyNcclCommunicator(group=dist.group.WORLD, device=rank)
-          assert not comm.disabled, 'PyNcclCommunicator disabled'
-          value = torch.full((16,), rank + 1.0, device='cuda')
-          result = comm.all_reduce(value)
-          torch.cuda.synchronize()
-          if result is None:
-              result = value
-          torch.testing.assert_close(result, torch.full_like(result, 3.0))
-          print(f'rank={rank} NCCL all_reduce passed', flush=True)
-          dist.destroy_process_group()
-          PY
-      - name: Reproduce default initialization
-        id: baseline
-        continue-on-error: true
-        run: timeout --kill-after=10s 180s torchrun --standalone --nproc_per_node=2 /tmp/h20_nccl_smoke.py
-      - name: Verify communication with NVLS disabled
-        env:
-          NCCL_NVLS_ENABLE: '0'
-        run: timeout --kill-after=10s 180s torchrun --standalone --nproc_per_node=2 /tmp/h20_nccl_smoke.py
+  h20-inference:
+    name: H20 inference verification
+    uses: ./.github/workflows/_e2e_test.yml
+    with:
+      platform: cuda
+      device: h20
+      task: inference
+      ci_image: harbor.baai.ac.cn/plugin/vllm-plugin-fl:v0.28.0-cuda-ci
+      runner_labels: '["vllm-plugin-ci-h20"]'
+      container_volumes: '["/data:/data"]'
+      container_options: >-
+        --privileged --gpus all --ipc=host --hostname vllm-plugin-fl --user root
+        --env VLLM_PLUGINS=fl --env USE_FLAGGEMS=1 --env GEMS_VENDOR=nvidia
+        --env USE_FLAGTUNE=0 --ulimit nofile=65535:65535
+      cases: '[{"model":"qwen3_6","case":"27b_tp2_eager"},{"model":"qwen3_6","case":"35b_a3b_tp2_graph"}]'
+      timeout: 60
+  h20-serving:
+    name: H20 serving verification
+    needs: h20-inference
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/_e2e_test.yml
+    with:
+      platform: cuda
+      device: h20
+      task: serving
+      ci_image: harbor.baai.ac.cn/plugin/vllm-plugin-fl:v0.28.0-cuda-ci
+      runner_labels: '["vllm-plugin-ci-h20"]'
+      container_volumes: '["/data:/data"]'
+      container_options: >-
+        --privileged --gpus all --ipc=host --hostname vllm-plugin-fl --user root
+        --env VLLM_PLUGINS=fl --env USE_FLAGGEMS=1 --env GEMS_VENDOR=nvidia
+        --env USE_FLAGTUNE=0 --ulimit nofile=65535:65535
+      cases: '[{"model":"qwen3_6","case":"27b_tp2_graph"},{"model":"qwen3_6","case":"35b_a3b_tp2_eager"}]'
+      timeout: 60
