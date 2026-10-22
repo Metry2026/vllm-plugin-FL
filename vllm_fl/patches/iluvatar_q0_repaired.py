@@ -23,14 +23,14 @@ def build_source(original: bytes) -> bytes:
     edits = (
         (
             "    L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)",
-            "    if (not IS_3D) and (not USE_SINKS) and KV_QUANT_MODE == KVQuantMode.INT8_PER_TOKEN_HEAD:\n"
+            "    if (not IS_3D) and (not USE_SINKS) and KV_QUANT_MODE == 2:\n"
             "        L = tl.full([BLOCK_M], 0.0, dtype=tl.float32)\n"
             "    else:\n"
             "        L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)",
         ),
         (
             "        acc = acc / L[:, None]",
-            "        if (not IS_3D) and (not USE_SINKS) and KV_QUANT_MODE == KVQuantMode.INT8_PER_TOKEN_HEAD:\n"
+            "        if (not IS_3D) and (not USE_SINKS) and KV_QUANT_MODE == 2:\n"
             "            visible_kv = tl.maximum(0, tl.minimum(seq_len, context_len + query_pos + 1))\n"
             "            zero_row = visible_kv == 0\n"
             "            safe_denominator = tl.where(zero_row, 1.0, L)\n"
