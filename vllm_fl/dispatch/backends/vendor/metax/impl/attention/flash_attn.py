@@ -3,6 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
 
+import os
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -68,6 +69,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from .mla.common import QueryLenSupport
 
 logger = init_logger(__name__)
+
+_METAX_PREFILL_CU_SEQLENS_K_REUSE = (
+    os.environ.get("VLLM_FL_METAX_PREFILL_CU_SEQLENS_K_REUSE", "0") == "1"
+)
 
 
 @register_backend(AttentionBackendEnum.FLASH_ATTN)
@@ -227,6 +232,7 @@ class FlashAttentionMetadata:
     prefill_query_start_loc: torch.Tensor
     prefill_max_seq_len: int
     prefill_seq_lens: torch.Tensor
+    prefill_cu_seqlens_k: torch.Tensor | None
     prefill_block_table: torch.Tensor
     # \------------------------- Metax Modification -------------------------/
 
@@ -417,6 +423,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         # /------------------------  Metax Modification -------------------------\
         # For handling prefill decode split
+        prefill_cu_seqlens_k = None
         if num_decodes > 0:
             decode_max_seq_len = int(
                 common_attn_metadata.seq_lens_cpu[:num_decodes].max()
@@ -450,8 +457,19 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefill_max_seq_len = 0
             prefill_query_start_loc = None
             prefill_seq_lens = None
+            prefill_cu_seqlens_k = None
             prefill_block_table_tensor = None
-        # \------------------------- Metax Modification -------------------------/
+        if num_prefills > 0 and _METAX_PREFILL_CU_SEQLENS_K_REUSE:
+            prefill_cu_seqlens_k = torch.cat(
+                (
+                    torch.zeros(
+                        1,
+                        dtype=torch.int32,
+                        device=prefill_seq_lens.device,
+                    ),
+                    prefill_seq_lens.to(dtype=torch.int32),
+                )
+            ).cumsum(dim=0, dtype=torch.int32)
 
         if _bi_mode:
             max_num_splits = 1
@@ -584,6 +602,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefill_query_start_loc=prefill_query_start_loc,
             prefill_max_seq_len=prefill_max_seq_len,
             prefill_seq_lens=prefill_seq_lens,
+            prefill_cu_seqlens_k=prefill_cu_seqlens_k,
             prefill_block_table=prefill_block_table_tensor,
             # \------------------------- Metax Modification -------------------------/
             block_table=block_table_tensor,
@@ -798,11 +817,15 @@ class FlashAttentionImpl(AttentionImpl):
                 # For handling prefill decode split
                 num_decode_tokens = attn_metadata.num_decode_tokens
                 if attn_metadata.num_prefills > 0:
-                    cu_prefix_kv_lens = torch.tensor(
-                        [0] + attn_metadata.prefill_seq_lens.tolist(),
-                        device=attn_metadata.prefill_seq_lens.device,
-                        dtype=torch.int32,
-                    ).cumsum(dim=0, dtype=torch.int32)
+                    if _METAX_PREFILL_CU_SEQLENS_K_REUSE:
+                        cu_prefix_kv_lens = attn_metadata.prefill_cu_seqlens_k
+                        assert cu_prefix_kv_lens is not None
+                    else:
+                        cu_prefix_kv_lens = torch.tensor(
+                            [0] + attn_metadata.prefill_seq_lens.tolist(),
+                            device=attn_metadata.prefill_seq_lens.device,
+                            dtype=torch.int32,
+                        ).cumsum(dim=0, dtype=torch.int32)
                     output[num_decode_tokens:num_actual_tokens] = (
                         flash_attn_varlen_func(
                             q=query[num_decode_tokens:num_actual_tokens],
