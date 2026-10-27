@@ -7,6 +7,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -295,6 +296,52 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 
+def _o702_model_guard(model_config, parallel_config, cache_config,
+                      speculative_config, lora_config) -> bool:
+    """Bind the opt-in experiment to the pinned local MiniCPM configuration."""
+    import hashlib
+    from pathlib import Path
+
+    try:
+        config = Path(model_config.model) / "config.json"
+        return (
+            hashlib.sha256(config.read_bytes()).hexdigest()
+            == "59613157e5357d62bcb121e04cb90f2170b43d789b142380c12c3d4277d95180"
+            and model_config.dtype == torch.bfloat16
+            and model_config.runner_type == "generate"
+            and model_config.quantization is None
+            and parallel_config.tensor_parallel_size == 1
+            and parallel_config.pipeline_parallel_size == 1
+            and parallel_config.data_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
+            and parallel_config.use_ubatching is False
+            and cache_config.kv_sharing_fast_prefill is False
+            and speculative_config is None
+            and lora_config is None
+        )
+    except (AttributeError, OSError, TypeError):
+        return False
+
+
+def _o702_identity_guard(hidden_states, logits_indices, num_reqs,
+                         num_tokens_unpadded, num_tokens_padded,
+                         max_num_scheduled_tokens) -> bool:
+    """Use host scheduling invariants; never read index values from the GPU."""
+    return (
+        1 <= num_reqs <= 512
+        and max_num_scheduled_tokens == 1
+        and num_tokens_unpadded == num_tokens_padded == num_reqs
+        and hidden_states.device.type == "cuda"
+        and hidden_states.dtype == torch.bfloat16
+        and hidden_states.shape == (num_reqs, 2048)
+        and hidden_states.stride() == (2048, 1)
+        and hidden_states.storage_offset() == 0
+        and logits_indices.device == hidden_states.device
+        and logits_indices.dtype in (torch.int32, torch.int64)
+        and logits_indices.shape == (num_reqs,)
+    )
+
+
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
@@ -494,6 +541,13 @@ class ModelRunnerFL(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self._o702_identity_gather = (
+            os.environ.get("VLLM_FL_O702_IDENTITY_GATHER", "0") == "1"
+            and _o702_model_guard(
+                self.model_config, self.parallel_config, self.cache_config,
+                self.speculative_config, self.lora_config,
+            )
+        )
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -4432,7 +4486,24 @@ class ModelRunnerFL(
                         kv_connector_output,
                     )
 
-                sample_hidden_states = hidden_states[logits_indices]
+                # Non-spec _prepare_inputs builds cumsum(schedule)[1:] - 1.
+                # Positive schedules with max=1 and total=R imply arange(R).
+                if (
+                    self._o702_identity_gather
+                    and spec_decode_metadata is None
+                    and not scheduler_output.scheduled_spec_decode_tokens
+                    and not self.use_aux_hidden_state_outputs
+                    and not self.num_prompt_logprobs
+                    and not should_ubatch
+                    and _o702_identity_guard(
+                        hidden_states, logits_indices, num_reqs,
+                        num_tokens_unpadded, num_tokens_padded,
+                        max_num_scheduled_tokens,
+                    )
+                ):
+                    sample_hidden_states = hidden_states
+                else:
+                    sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
