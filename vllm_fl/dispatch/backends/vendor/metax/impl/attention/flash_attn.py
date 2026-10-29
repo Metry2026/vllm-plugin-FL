@@ -73,6 +73,57 @@ logger = init_logger(__name__)
 _METAX_PREFILL_CU_SEQLENS_K_REUSE = (
     os.environ.get("VLLM_FL_METAX_PREFILL_CU_SEQLENS_K_REUSE", "0") == "1"
 )
+_METAX_PREFILL_DIRECT_KV = (
+    os.environ.get("VLLM_FL_METAX_PREFILL_DIRECT_KV", "0") == "1"
+)
+
+
+def _direct_prefill_host_eligible(cm, num_decodes: int, num_decode_tokens: int) -> bool:
+    """Snapshot a proof from existing host fields, never from lazy properties.
+
+    In the verified MetaX runner, without speculation, both CPU and GPU lengths
+    are computed from the same computed/scheduled counts, including ordinary
+    async scheduling. Zero-length rows or token padding fail closed.
+    """
+    starts = cm.query_start_loc_cpu
+    seq = cm._seq_lens_cpu
+    computed = cm._num_computed_tokens_cpu
+    n = cm.num_reqs
+    if (seq is None or computed is None or cm.causal is not True
+            or cm.mm_req_doc_ranges is not None or not 0 <= num_decodes < n):
+        return False
+    for tensor, size in ((starts, n + 1), (seq, n), (computed, n)):
+        if (tensor.device.type != "cpu" or tensor.ndim != 1
+                or tensor.numel() != size
+                or tensor.dtype not in (torch.int32, torch.int64)):
+            return False
+    # Consume values now: these buffers may be reused on the next scheduler step.
+    qstarts, lengths, histories = starts.tolist(), seq.tolist(), computed.tolist()
+    if (qstarts[0] != 0 or qstarts[-1] != cm.num_actual_tokens
+            or qstarts[num_decodes] != num_decode_tokens):
+        return False
+    queries = [b - a for a, b in zip(qstarts, qstarts[1:])]
+    if any(q <= 0 for q in queries):
+        return False
+    return all(histories[i] == 0 and lengths[i] == queries[i]
+               for i in range(num_decodes, n))
+
+
+def _direct_prefill_layout_eligible(query, key, value, kv_cache, n: int) -> bool:
+    """Only verified dense heads with contiguous or fused-QKV token strides."""
+    if key is None or value is None or kv_cache.dtype != torch.bfloat16:
+        return False
+    for tensor, heads, strides in (
+        (query, 16, (2048, 2560)), (key, 2, (256, 2560)),
+        (value, 2, (256, 2560)),
+    ):
+        if (tensor.dtype != torch.bfloat16 or tensor.device != kv_cache.device
+                or tensor.ndim != 3 or tensor.shape[0] < n
+                or tensor.shape[1:] != (heads, 128)
+                or tensor.stride(0) not in strides
+                or tensor.stride(1) != 128 or tensor.stride(2) != 1):
+            return False
+    return True
 
 
 @register_backend(AttentionBackendEnum.FLASH_ATTN)
@@ -253,6 +304,8 @@ class FlashAttentionMetadata:
     max_num_splits: int = 0
 
     causal: bool = True
+    # Value computed once before the builder can materialize lazy host fields.
+    prefill_direct_kv: bool = False
 
 
 def _get_sliding_window_configs(
@@ -299,6 +352,12 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
+        self.direct_prefill_config_ok = (
+            vllm_config.speculative_config is None
+            and vllm_config.kv_transfer_config is None
+            and not self.model_config.is_multimodal_model
+            and not _bi_mode
+        )
 
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config
@@ -392,6 +451,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         assert num_decode_tokens + num_prefill_tokens == num_actual_tokens
         assert num_decodes + num_prefills == num_reqs
+        prefill_direct_kv = bool(
+            _METAX_PREFILL_DIRECT_KV and self.direct_prefill_config_ok
+            and self.dcp_world_size == 1 and common_prefix_len == 0
+            and num_prefills > 0
+            and _direct_prefill_host_eligible(
+                common_attn_metadata, num_decodes, num_decode_tokens
+            )
+        )
         # \------------------------- Metax Modification -------------------------/
 
         # the overhead of the aot schedule is not worth it for spec-decode
@@ -618,6 +685,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
+            prefill_direct_kv=prefill_direct_kv,
         )
         return attn_metadata
 
@@ -817,7 +885,23 @@ class FlashAttentionImpl(AttentionImpl):
                 # For handling prefill decode split
                 num_decode_tokens = attn_metadata.num_decode_tokens
                 if attn_metadata.num_prefills > 0:
-                    if _METAX_PREFILL_CU_SEQLENS_K_REUSE:
+                    direct_kv = (
+                        _METAX_PREFILL_DIRECT_KV and attn_metadata.prefill_direct_kv
+                        and self.attn_type == AttentionType.DECODER
+                        and self.kv_sharing_target_layer_name is None
+                        and self.kv_cache_dtype == "auto"
+                        and self.num_heads == 16 and self.num_kv_heads == 2
+                        and self.head_size == 128
+                        and self.sliding_window == (-1, -1)
+                        and self.alibi_slopes is None and self.logits_soft_cap == 0
+                        and self.sinks is None and not self.batch_invariant_enabled
+                        and _direct_prefill_layout_eligible(
+                            query, key, value, kv_cache, num_actual_tokens
+                        )
+                    )
+                    if direct_kv:
+                        cu_prefix_kv_lens = attn_metadata.prefill_query_start_loc
+                    elif _METAX_PREFILL_CU_SEQLENS_K_REUSE:
                         cu_prefix_kv_lens = attn_metadata.prefill_cu_seqlens_k
                         assert cu_prefix_kv_lens is not None
                     else:
@@ -829,9 +913,9 @@ class FlashAttentionImpl(AttentionImpl):
                     output[num_decode_tokens:num_actual_tokens] = (
                         flash_attn_varlen_func(
                             q=query[num_decode_tokens:num_actual_tokens],
-                            k=key_cache,
-                            v=value_cache,
-                            block_table=attn_metadata.prefill_block_table,
+                            k=key[num_decode_tokens:num_actual_tokens] if direct_kv else key_cache,
+                            v=value[num_decode_tokens:num_actual_tokens] if direct_kv else value_cache,
+                            block_table=None if direct_kv else attn_metadata.prefill_block_table,
                             cu_seqlens_q=attn_metadata.prefill_query_start_loc,
                             cu_seqlens_k=cu_prefix_kv_lens,
                             max_seqlen_q=attn_metadata.max_query_len,
