@@ -176,9 +176,10 @@ def install():
     bn = int(os.environ.get("VLLM_FL_W006_BLOCK_N", "32"))
     if bq not in (2, 4, 8) or bn not in (32, 64):
         raise ValueError("Invalid W006 tile configuration")
-    from flag_gems.runtime.backend._iluvatar.fused.paged_gqa_attention import (
-        paged_gqa_attention,
-    )
+    if os.environ.get("VLLM_FL_PAGED_GQA_SCALAR_PAGES", "0") == "1":
+        from flag_gems.runtime.backend._iluvatar.fused.paged_gqa_page_supply import paged_gqa_attention
+    else:
+        from flag_gems.runtime.backend._iluvatar.fused.paged_gqa_attention import paged_gqa_attention
 
     triton_attn.unified_attention = make_dispatch(
         ops.unified_attention,
