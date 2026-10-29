@@ -7,6 +7,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -500,6 +501,30 @@ class ModelRunnerFL(
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
         self.device = device
+        # Freeze the opt-in and the audited C500/Llama execution domain once.
+        # The per-step proof below uses the same host counts as _prepare_inputs.
+        self._identity_logits_gather_enabled = (
+            os.environ.get("VLLM_FL_METAX_IDENTITY_LOGITS_GATHER", "0") == "1"
+            and getattr(current_platform, "vendor_name", None) == "metax"
+            and model_config.runner_type == "generate"
+            and getattr(model_config.hf_config, "architectures", None)
+            == ["LlamaForCausalLM"]
+            and getattr(model_config.hf_config, "hidden_size", None) == 2048
+            and model_config.quantization is None
+            and not model_config.is_encoder_decoder
+            and not model_config.enable_prompt_embeds
+            and model_config.multimodal_config is None
+            and self.lora_config is None
+            and self.speculative_config is None
+            and parallel_config.tensor_parallel_size == 1
+            and parallel_config.pipeline_parallel_size == 1
+            and parallel_config.data_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
+            and not parallel_config.use_ubatching
+            and not cache_config.kv_sharing_fast_prefill
+            and vllm_config.kv_transfer_config is None
+            and vllm_config.ec_transfer_config is None
+        )
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
 
@@ -4121,6 +4146,51 @@ class ModelRunnerFL(
         num_reqs = self.input_batch.num_reqs
         return bool(self.discard_request_mask.np[:num_reqs].all())
 
+    def _can_skip_identity_logits_gather(
+        self,
+        hidden_states: torch.Tensor,
+        logits_indices: torch.Tensor,
+        num_scheduled_tokens_np: np.ndarray,
+        num_reqs: int,
+        num_tokens_unpadded: int,
+        num_tokens_padded: int,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        has_scheduled_spec_tokens: bool,
+        ubatch_slices: UBatchSlices | None,
+    ) -> bool:
+        # _prepare_inputs computes query_start_loc from these request-ordered
+        # counts, then (without spec) logits_indices = query_start_loc[1:] - 1.
+        # Thus all-one counts prove identity without reading a GPU index.
+        # No padded-prefix views: the complete dense tensor must match exactly.
+        return (
+            self._identity_logits_gather_enabled
+            and not self.broadcast_pp_output
+            and self.speculative_config is None
+            and spec_decode_metadata is None
+            and not has_scheduled_spec_tokens
+            and not self.use_aux_hidden_state_outputs
+            and ubatch_slices is None
+            and num_reqs > 0
+            and num_tokens_unpadded == num_tokens_padded == num_reqs
+            and type(num_scheduled_tokens_np) is np.ndarray
+            and num_scheduled_tokens_np.shape == (num_reqs,)
+            and num_scheduled_tokens_np.dtype == np.int32
+            and bool(np.all(num_scheduled_tokens_np == 1))
+            and type(hidden_states) is torch.Tensor
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.layout == torch.strided
+            and hidden_states.shape == (num_reqs, 2048)
+            and hidden_states.stride() == (2048, 1)
+            and hidden_states.device == self.device
+            and hidden_states.device.type == "cuda"
+            and type(logits_indices) is torch.Tensor
+            and logits_indices.shape == (num_reqs,)
+            and logits_indices.dtype == torch.int32
+            and logits_indices.layout == torch.strided
+            and logits_indices.stride() == (1,)
+            and logits_indices.device == self.device
+        )
+
     @managed_inference_mode()
     def execute_model(
         self,
@@ -4432,7 +4502,23 @@ class ModelRunnerFL(
                         kv_connector_output,
                     )
 
-                sample_hidden_states = hidden_states[logits_indices]
+                if self._can_skip_identity_logits_gather(
+                    hidden_states,
+                    logits_indices,
+                    num_scheduled_tokens_np,
+                    num_reqs,
+                    num_tokens_unpadded,
+                    num_tokens_padded,
+                    spec_decode_metadata,
+                    bool(scheduler_output.scheduled_spec_decode_tokens),
+                    ubatch_slices_padded,
+                ):
+                    # LM head reads this buffer on the model stream before its
+                    # next Graph replay. No-spec async output retains only the
+                    # sampled outputs, not this ephemeral hidden-state alias.
+                    sample_hidden_states = hidden_states
+                else:
+                    sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
