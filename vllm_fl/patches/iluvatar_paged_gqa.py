@@ -177,7 +177,10 @@ def install():
     if bq not in (2, 4, 8) or bn not in (32, 64):
         raise ValueError("Invalid W006 tile configuration")
     if os.environ.get("VLLM_FL_PAGED_GQA_SCALAR_PAGES", "0") == "1":
-        from flag_gems.runtime.backend._iluvatar.fused.paged_gqa_page_supply import paged_gqa_attention
+        if os.environ.get("VLLM_FL_PAGED_GQA_SINGLE_STAGE", "0") == "1":
+            from flag_gems.runtime.backend._iluvatar.fused.paged_gqa_single_stage import paged_gqa_attention
+        else:
+            from flag_gems.runtime.backend._iluvatar.fused.paged_gqa_page_supply import paged_gqa_attention
     else:
         from flag_gems.runtime.backend._iluvatar.fused.paged_gqa_attention import paged_gqa_attention
 
