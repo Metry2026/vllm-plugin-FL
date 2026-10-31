@@ -538,6 +538,13 @@ class ModelRunnerFL(
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
+        if os.environ.get("VLLM_FL_GROUPED_GATEUP_CTA", "0") == "1":
+            import flag_gems
+            import sys
+            mm_module = sys.modules[flag_gems.mm_out.__module__]
+            from importlib import import_module
+            grouped = import_module(mm_module.__package__ + ".grouped_gateup_cta")
+            grouped.configure_model(self.model_config, self.parallel_config)
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
