@@ -623,6 +623,10 @@ class ModelRunnerFL(
             use_fp64_gumbel=self.model_config.use_fp64_gumbel,
         )
 
+        if os.getenv('VLLM_FL_SAMPLER_CAST_TEMP', '0') == '1':
+            from vllm_fl.ops.sampler_cast_temperature import install
+            self.sampler = install(self.sampler, self.vllm_config)
+
         self.eplb_state: EplbState | None = None
         self._moe_model: MixtureOfExperts | None = None
         # NOTE(yongji): flag to temporarily disable EPLB during scaling up/down
