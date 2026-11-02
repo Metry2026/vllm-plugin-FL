@@ -801,6 +801,10 @@ class ModelRunnerFL(
             reasoning_config=self.vllm_config.reasoning_config,
         )
 
+        self._task017_rectangular_copy = (
+            os.getenv("VLLM_FL_TASK017_RECTANGULAR_COPY", "0") == "1"
+        )
+
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
         self.async_output_copy_stream: current_platform.torch_device_fn.Stream | None = None
@@ -2022,7 +2026,12 @@ class ModelRunnerFL(
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit_block_table(num_reqs)
+        if self._task017_rectangular_copy:
+            from vllm_fl.ops.rectangular_block_table import commit
+
+            commit(self, num_reqs, num_scheduled_tokens)
+        else:
+            self.input_batch.block_table.commit_block_table(num_reqs)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
