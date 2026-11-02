@@ -801,6 +801,10 @@ class ModelRunnerFL(
             reasoning_config=self.vllm_config.reasoning_config,
         )
 
+        self._task016_skip_unchanged = (
+            os.getenv("VLLM_FL_TASK016_SKIP_UNCHANGED", "0") == "1"
+        )
+
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
         self.async_output_copy_stream: current_platform.torch_device_fn.Stream | None = None
@@ -2022,7 +2026,12 @@ class ModelRunnerFL(
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit_block_table(num_reqs)
+        if self._task016_skip_unchanged:
+            from vllm_fl.ops.unchanged_block_table import commit
+
+            commit(self, num_reqs)
+        else:
+            self.input_batch.block_table.commit_block_table(num_reqs)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -2373,6 +2382,7 @@ class ModelRunnerFL(
         def _get_block_table(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
+            blk_table = None
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 blk_table_tensor = torch.zeros(
                     (num_reqs_padded, 1),
@@ -2385,7 +2395,14 @@ class ModelRunnerFL(
 
             # Fill unused block table entries with NULL_BLOCK_ID (null block)
             # for CUDAGraph padding. Block 0 is reserved for padding.
-            blk_table_tensor[num_reqs:num_reqs_padded].fill_(NULL_BLOCK_ID)
+            if self._task016_skip_unchanged:
+                from vllm_fl.ops.unchanged_block_table import padding
+
+                padding(self, blk_table, num_reqs, num_reqs_padded,
+                        lambda: blk_table_tensor[num_reqs:num_reqs_padded].fill_(NULL_BLOCK_ID),
+                        for_cudagraph_capture)
+            else:
+                blk_table_tensor[num_reqs:num_reqs_padded].fill_(NULL_BLOCK_ID)
             return blk_table_tensor
 
         assert slot_mappings is not None
@@ -3884,10 +3901,18 @@ class ModelRunnerFL(
         # This is required in the async scheduling case because
         # the CPU->GPU transfer happens async.
         self.prepare_inputs_event.synchronize()
+        if self._task016_skip_unchanged:
+            from vllm_fl.ops.unchanged_block_table import begin, finish
+
+            begin(self)
+        succeeded = False
         try:
             yield
+            succeeded = True
         finally:
             self.prepare_inputs_event.record()
+            if self._task016_skip_unchanged:
+                finish(self, succeeded)
 
     def _model_forward(
         self,
