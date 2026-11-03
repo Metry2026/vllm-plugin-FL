@@ -30,7 +30,7 @@ def _scope(r):
     from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
     if (type(r).__module__ != "vllm_fl.worker.model_runner" or type(r).__name__ != "ModelRunnerFL"
             or hashlib.sha256(Path(inspect.getsourcefile(type(r))).read_bytes()).hexdigest()
-            != "e7e8d4003c57e0de8a1ecc1e720ef55eb6f8f54cd325d98666c0190b5c05b977"):
+            != "7fff4c2d736f8eb45a4affb916e0fdc7027166f4202850aebbc8c0bd8e8fffdf"):
         return False
     p=r.parallel_config
     if (r.model_config.dtype != torch.bfloat16 or p.tensor_parallel_size != 1

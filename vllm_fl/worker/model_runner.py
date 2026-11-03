@@ -809,6 +809,10 @@ class ModelRunnerFL(
             os.getenv("VLLM_FL_TASK020_FUSED_INT_PREP", "0") == "1"
         )
 
+        self._task021_fused_cu_prep = (
+            os.getenv("VLLM_FL_TASK021_FUSED_CU_PREP", "0") == "1"
+        )
+
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
         self.async_output_copy_stream: current_platform.torch_device_fn.Stream | None = None
@@ -2148,7 +2152,18 @@ class ModelRunnerFL(
         # Note: pad query_start_loc to be non-decreasing, as kernels
         # like FlashAttention requires that
         self.query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
-        self.query_start_loc.copy_to_gpu()
+        cu_prep_plan = None
+        if (single_token_prep and self._task020_fused_int_prep
+                and self._task021_fused_cu_prep):
+            from vllm_fl.ops.fused_cu_input_prep import preflight
+
+            cu_prep_plan = preflight(
+                self.num_computed_tokens, self.positions, self.seq_lens,
+                self.query_start_loc.gpu, num_reqs,
+                self.query_start_loc.cpu, self.query_start_loc.np,
+            )
+        if cu_prep_plan is None:
+            self.query_start_loc.copy_to_gpu()
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
         # Compute optimistic seq_lens (assumes all draft tokens from previous
@@ -2256,7 +2271,11 @@ class ModelRunnerFL(
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
         fused_int_prep = False
-        if single_token_prep and self._task020_fused_int_prep:
+        if cu_prep_plan is not None:
+            from vllm_fl.ops.fused_cu_input_prep import launch
+
+            fused_int_prep = launch(cu_prep_plan)
+        elif single_token_prep and self._task020_fused_int_prep:
             from vllm_fl.ops.fused_int_input_prep import try_fuse
 
             fused_int_prep = try_fuse(
