@@ -804,6 +804,9 @@ class ModelRunnerFL(
         self._task018_single_token_prep = (
             os.getenv("VLLM_FL_TASK018_SINGLE_TOKEN_PREP", "0") == "1"
         )
+        self._task019_identity_input_ids = (
+            os.getenv("VLLM_FL_TASK019_IDENTITY_INPUT_IDS", "0") == "1"
+        )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
@@ -1844,6 +1847,20 @@ class ModelRunnerFL(
         Uses self.prev_positions[:num_reqs] which maps current pos -> prev pos
         (-1 for new requests).
         """
+
+        if self._task019_identity_input_ids:
+            from vllm_fl.ops.identity_input_ids import eligible
+
+            if eligible(
+                self, scheduler_output, num_reqs,
+                total_num_scheduled_tokens, cu_num_tokens,
+            ):
+                # Same existing copy, before constructing per-request indices.
+                self.input_ids.gpu[:num_reqs].copy_(
+                    self.input_batch.prev_sampled_token_ids[:num_reqs, 0],
+                    non_blocking=True,
+                )
+                return
 
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
