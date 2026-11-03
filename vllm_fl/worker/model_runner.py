@@ -809,6 +809,10 @@ class ModelRunnerFL(
             os.getenv("VLLM_FL_TASK020_FUSED_INT_PREP", "0") == "1"
         )
 
+        self._task022_const_logits_indices = (
+            os.getenv("VLLM_FL_TASK022_CONST_LOGITS_INDICES", "0") == "1"
+        )
+
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
         self.async_output_copy_stream: current_platform.torch_device_fn.Stream | None = None
@@ -920,6 +924,16 @@ class ModelRunnerFL(
         self.arange_np = np.arange(arange_size, dtype=np.int64)
         self.query_pos = self._make_buffer(arange_size, dtype=torch.int64)
         self._arange_scratch = np.empty(arange_size, dtype=np.int64)
+
+        # Immutable, runner-owned indices; initialized before existing capture
+        # synchronization, never refilled or borrowed from mutable CU storage.
+        self._task022_logits_index_constant = None
+        if (self._task018_single_token_prep and self._task020_fused_int_prep
+                and self._task022_const_logits_indices
+                and 0 < self.max_num_reqs <= 2147483647):
+            self._task022_logits_index_constant = torch.arange(
+                self.max_num_reqs, dtype=torch.int32, device=self.device,
+            )
 
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
@@ -2323,7 +2337,18 @@ class ModelRunnerFL(
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            logits_indices = query_start_loc[1:] - 1
+            logits_indices = None
+            if (single_token_prep and fused_int_prep
+                    and self._task022_const_logits_indices
+                    and not self.cache_config.kv_sharing_fast_prefill):
+                from vllm_fl.ops.constant_logits_indices import prefix
+
+                logits_indices = prefix(
+                    self._task022_logits_index_constant, num_reqs,
+                    self.max_num_reqs, self.device,
+                )
+            if logits_indices is None:
+                logits_indices = query_start_loc[1:] - 1
             spec_decode_metadata = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
         else:
