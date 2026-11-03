@@ -805,6 +805,10 @@ class ModelRunnerFL(
             os.getenv("VLLM_FL_TASK018_SINGLE_TOKEN_PREP", "0") == "1"
         )
 
+        self._task020_fused_int_prep = (
+            os.getenv("VLLM_FL_TASK020_FUSED_INT_PREP", "0") == "1"
+        )
+
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
         self.async_output_copy_stream: current_platform.torch_device_fn.Stream | None = None
@@ -2251,9 +2255,17 @@ class ModelRunnerFL(
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
+        fused_int_prep = False
+        if single_token_prep and self._task020_fused_int_prep:
+            from vllm_fl.ops.fused_int_input_prep import try_fuse
+
+            fused_int_prep = try_fuse(
+                self.num_computed_tokens, self.positions, self.seq_lens, num_reqs,
+            )
         if single_token_prep:
-            self.positions[:num_reqs].copy_(self.num_computed_tokens[:num_reqs])
-            self.seq_lens[:num_reqs] = self.num_computed_tokens[:num_reqs] + 1
+            if not fused_int_prep:
+                self.positions[:num_reqs].copy_(self.num_computed_tokens[:num_reqs])
+                self.seq_lens[:num_reqs] = self.num_computed_tokens[:num_reqs] + 1
         else:
             self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
             self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
@@ -2266,7 +2278,8 @@ class ModelRunnerFL(
             self.seq_lens[:num_reqs] = (
                 self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
             )
-        self.seq_lens[num_reqs:].fill_(0)
+        if not fused_int_prep:
+            self.seq_lens[num_reqs:].fill_(0)
 
         self.input_batch.block_table.compute_slot_mapping(
             num_reqs,
