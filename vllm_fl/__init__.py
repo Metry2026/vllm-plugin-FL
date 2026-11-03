@@ -176,6 +176,9 @@ def register_model():
     from vllm_fl.patches.iluvatar_paged_gqa import install as install_paged_gqa
     install_paged_gqa()
 
+    from vllm_fl.patches.iluvatar_packed_map import install as install_packed_map
+    install_packed_map()
+
     # Register GLM-5 (GlmMoeDsa) — config not yet upstream
     try:
         from vllm.transformers_utils.config import _CONFIG_REGISTRY
