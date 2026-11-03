@@ -801,6 +801,10 @@ class ModelRunnerFL(
             reasoning_config=self.vllm_config.reasoning_config,
         )
 
+        self._task018_single_token_prep = (
+            os.getenv("VLLM_FL_TASK018_SINGLE_TOKEN_PREP", "0") == "1"
+        )
+
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
         self.async_output_copy_stream: current_platform.torch_device_fn.Stream | None = None
@@ -2024,21 +2028,40 @@ class ModelRunnerFL(
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
 
-        # Get request indices.
-        # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+        single_token_prep = False
+        if self._task018_single_token_prep:
+            from vllm_fl.ops.single_token_input_prep import eligible
 
-        # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
-        # self.query_pos.np[:10]: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        cu_num_tokens = self._get_cumsum_and_arange(
-            num_scheduled_tokens, self.query_pos.np
-        )
+            single_token_prep = eligible(
+                self, scheduler_output, num_scheduled_tokens, num_reqs,
+                total_num_scheduled_tokens,
+            )
+        if single_token_prep:
+            # Read-only uses of existing immutable arange. Later consumers do
+            # not modify these views; generic/spec paths retain their arrays.
+            req_indices = self.arange_np[:num_reqs]
+            cu_num_tokens = self.arange_np[1 : num_reqs + 1]
+            # Dummy/mixed steps may have left nonzero CPU query positions.
+            self.query_pos.np[:num_reqs].fill(0)
+            positions_np = self.input_batch.num_computed_tokens_cpu[:num_reqs].astype(
+                np.int64
+            )
+        else:
+            # Get request indices.
+            # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
+            req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
-        # Get positions.
-        positions_np = (
-            self.input_batch.num_computed_tokens_cpu[req_indices]
-            + self.query_pos.np[: cu_num_tokens[-1]]
-        )
+            # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
+            # self.query_pos.np[:10]: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+            cu_num_tokens = self._get_cumsum_and_arange(
+                num_scheduled_tokens, self.query_pos.np
+            )
+
+            # Get positions.
+            positions_np = (
+                self.input_batch.num_computed_tokens_cpu[req_indices]
+                + self.query_pos.np[: cu_num_tokens[-1]]
+            )
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -2223,21 +2246,26 @@ class ModelRunnerFL(
                 non_blocking=True,
             )
 
+        # Keep CPU-visible intermediate state, even when its GPU data is
+        # not read by the guarded single-token path.
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
-        self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
-        req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
-
-        self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
-        self.num_scheduled_tokens.copy_to_gpu(num_reqs)
-        num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
-        self.positions[:total_num_scheduled_tokens] = (
-            self.num_computed_tokens[req_indices_gpu].to(torch.int64)
-            + self.query_pos.gpu[:total_num_scheduled_tokens]
-        )
-        self.seq_lens[:num_reqs] = (
-            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
-        )
+        req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
+        if single_token_prep:
+            self.positions[:num_reqs].copy_(self.num_computed_tokens[:num_reqs])
+            self.seq_lens[:num_reqs] = self.num_computed_tokens[:num_reqs] + 1
+        else:
+            self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
+            self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
+            self.num_scheduled_tokens.copy_to_gpu(num_reqs)
+            num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
+            self.positions[:total_num_scheduled_tokens] = (
+                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+                + self.query_pos.gpu[:total_num_scheduled_tokens]
+            )
+            self.seq_lens[:num_reqs] = (
+                self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+            )
         self.seq_lens[num_reqs:].fill_(0)
 
         self.input_batch.block_table.compute_slot_mapping(
