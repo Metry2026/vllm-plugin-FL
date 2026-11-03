@@ -260,6 +260,9 @@ class PlatformFL(Platform):
                 attention_config.use_trtllm_attention = False
                 attention_config.disable_flashinfer_prefill = True
 
+        from vllm_fl.patches.iluvatar_rope_kv import configure as configure_rope_kv
+        configure_rope_kv(vllm_config)
+
     @classmethod
     def get_attn_backend_cls(
         cls,

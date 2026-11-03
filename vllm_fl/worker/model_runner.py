@@ -813,6 +813,10 @@ class ModelRunnerFL(
             os.getenv("VLLM_FL_TASK022_CONST_LOGITS_INDICES", "0") == "1"
         )
 
+        self._task023_rope_kv_fusion = (
+            os.getenv("VLLM_FL_TASK023_ROPE_KV_FUSION", "0") == "1"
+        )
+
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
         self.async_output_copy_stream: current_platform.torch_device_fn.Stream | None = None
@@ -2426,6 +2430,17 @@ class ModelRunnerFL(
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
 
+        # Current CPU scheduling facts, not max_query_len or a capture-time flag.
+        # Graph replay uses the original dispatcher's uniform BatchDescriptor.
+        task023_all1 = (
+            self._task023_rope_kv_fusion and not for_cudagraph_capture
+            and not use_spec_decode and ubatch_slices is None
+            and 1 <= num_reqs <= 8 and num_tokens == num_reqs
+            and num_scheduled_tokens is not None
+            and len(num_scheduled_tokens) == num_reqs
+            and all(x == 1 for x in num_scheduled_tokens.values())
+        )
+
         if for_cudagraph_capture:
             # For some attention backends (e.g. FA) with sliding window models we need
             # to make sure the backend see a max_seq_len that is larger to the sliding
@@ -2625,6 +2640,9 @@ class ModelRunnerFL(
                 )
                 if builder.supports_update_block_table:
                     cached_attn_metadata[cache_key] = attn_metadata_i
+
+            if self._task023_rope_kv_fusion:
+                attn_metadata_i._task023_all1 = task023_all1
 
             if ubid is None:
                 assert isinstance(attn_metadata, dict)
