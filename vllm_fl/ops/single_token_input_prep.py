@@ -23,6 +23,34 @@ _SOURCES = {
 }
 
 
+def _supported_cache_spec(r, spec):
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+    if type(spec) is FullAttentionSpec:
+        return True
+    if os.environ.get('VLLM_FL_TASK030_MIXED_V_CACHE', '0') != '1':
+        return False
+    from vllm_fl.ops.mixed_v_cache import MixedVFullAttentionSpec
+    from vllm_fl.patches import mixed_v_cache_patch as patch
+    if (not patch._INSTALLED or id(r.vllm_config) not in patch._VALIDATED_CONFIGS
+            or type(spec) is not MixedVFullAttentionSpec):
+        return False
+    if ((spec.block_size, spec.num_kv_heads, spec.head_size, spec.head_size_v)
+            != (16, 2, 128, 128) or spec.dtype != torch.uint8
+            or spec.kv_quant_mode != KVQuantMode.NONE
+            or spec.real_page_size_bytes != 12416 or spec.page_size_bytes != 12416
+            or not spec.indexes_kv_by_block_stride or spec.sliding_window is not None
+            or spec.attention_chunk_size is not None or spec.non_causal):
+        return False
+    caches = r.kv_caches
+    return len(caches) == 42 and all(
+        (owner := patch._OWNERS.get(id(cache))) is not None
+        and owner.raw is cache and cache.dtype == torch.uint8
+        and cache.ndim == 2 and cache.shape[1] == 12416
+        and cache.stride(1) == 1 and cache.stride(0) >= 12416
+        and cache.stride(0) % 4 == 0 and cache.storage_offset() % 4 == 0
+        for cache in caches)
+
+
 def _scope(r):
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.block_table import MultiGroupBlockTable, BlockTable
@@ -44,7 +72,7 @@ def _scope(r):
             or type(r.input_batch.block_table) is not MultiGroupBlockTable
             or len(r.input_batch.block_table.block_tables) != 1
             or len(r.kv_cache_config.kv_cache_groups) != 1
-            or type(r.kv_cache_config.kv_cache_groups[0].kv_cache_spec) is not FullAttentionSpec
+            or not _supported_cache_spec(r, r.kv_cache_config.kv_cache_groups[0].kv_cache_spec)
             or np.dtype(np.intp) != np.dtype(np.int64) or r.arange_np.dtype != np.int64):
         return False
     b=r.input_batch.block_table[0]

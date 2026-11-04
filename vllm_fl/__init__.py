@@ -176,6 +176,10 @@ def register_model():
     from vllm_fl.patches.iluvatar_paged_gqa import install as install_paged_gqa
     install_paged_gqa()
 
+    if os.environ.get('VLLM_FL_TASK030_MIXED_V_CACHE', '0') == '1':
+        from vllm_fl.patches.mixed_v_cache_patch import install as install_mixed_v_cache
+        install_mixed_v_cache()
+
     # Register GLM-5 (GlmMoeDsa) — config not yet upstream
     try:
         from vllm.transformers_utils.config import _CONFIG_REGISTRY
