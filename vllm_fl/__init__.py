@@ -176,6 +176,10 @@ def register_model():
     from vllm_fl.patches.iluvatar_paged_gqa import install as install_paged_gqa
     install_paged_gqa()
 
+    if os.environ.get("VLLM_FL_TASK027_DIV_ARGMAX", "0") == "1":
+        from vllm_fl.ops.iluvatar_div_argmax import install as install_div_argmax
+        install_div_argmax()
+
     # Register GLM-5 (GlmMoeDsa) — config not yet upstream
     try:
         from vllm.transformers_utils.config import _CONFIG_REGISTRY
