@@ -626,6 +626,10 @@ class ModelRunnerFL(
         if os.getenv("VLLM_FL_TASK069_PRIVATE_SAMPLING", "0") == "1":
             from vllm_fl.patches.iluvatar_private_sampling import install
             self._task069_private_sampling_installed = install()
+        self._task070_mixed_decode_installed = False
+        if os.getenv("VLLM_FL_TASK070_MIXED_DECODE", "0") == "1":
+            from vllm_fl.patches.iluvatar_mixed_decode import install
+            self._task070_mixed_decode_installed = install(self)
         self.sampler = Sampler(
             logprobs_mode=self.model_config.logprobs_mode,
             use_fp64_gumbel=self.model_config.use_fp64_gumbel,
