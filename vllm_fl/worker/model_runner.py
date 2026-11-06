@@ -622,6 +622,10 @@ class ModelRunnerFL(
         if os.getenv("VLLM_FL_TASK066_UNIT_TEMPERATURE", "0") == "1":
             from vllm_fl.patches.iluvatar_unit_temperature import install
             self._task066_unit_temperature_installed = install()
+        self._task069_private_sampling_installed = False
+        if os.getenv("VLLM_FL_TASK069_PRIVATE_SAMPLING", "0") == "1":
+            from vllm_fl.patches.iluvatar_private_sampling import install
+            self._task069_private_sampling_installed = install()
         self.sampler = Sampler(
             logprobs_mode=self.model_config.logprobs_mode,
             use_fp64_gumbel=self.model_config.use_fp64_gumbel,
