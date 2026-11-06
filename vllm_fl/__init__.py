@@ -175,6 +175,8 @@ def register_model():
 
     from vllm_fl.patches.iluvatar_paged_gqa import install as install_paged_gqa
     install_paged_gqa()
+    from vllm_fl.patches.iluvatar_decode_page_reuse import install as install_page_reuse
+    install_page_reuse()
 
     # Register GLM-5 (GlmMoeDsa) — config not yet upstream
     try:
