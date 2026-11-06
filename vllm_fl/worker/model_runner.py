@@ -618,6 +618,10 @@ class ModelRunnerFL(
         self.use_async_scheduling = self.scheduler_config.async_scheduling
 
         # Sampler
+        self._task066_unit_temperature_installed = False
+        if os.getenv("VLLM_FL_TASK066_UNIT_TEMPERATURE", "0") == "1":
+            from vllm_fl.patches.iluvatar_unit_temperature import install
+            self._task066_unit_temperature_installed = install()
         self.sampler = Sampler(
             logprobs_mode=self.model_config.logprobs_mode,
             use_fp64_gumbel=self.model_config.use_fp64_gumbel,
