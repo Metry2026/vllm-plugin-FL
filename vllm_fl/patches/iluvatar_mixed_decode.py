@@ -14,6 +14,7 @@ _ACTIVE = ContextVar('task070_current_forward', default=None)
 _INSTALLED = False
 _BASELINE = _DISPATCH = _FUSED = None
 _BACKEND = _FG = _PAGED = _RUNNER_CLASS = _BATCH_CLASS = None
+_REQUEST_CLASS = None
 _BUILD_FUNCTION = _EXECUTE_FUNCTION = _MODEL_FUNCTION = None
 _SOURCE_PINS = {'vllm.v1.attention.backends.triton_attn': '1219c4d1820b56e99ef6686de8a49c8c5aa57707794bcabf3322023799a03605', 'vllm.v1.attention.ops.triton_unified_attention': 'bab2c0b9f9a7793ca411796b48ebb4734433160e7e99eabf46ddb7f1c30cb6e0', 'vllm.v1.worker.gpu_input_batch': 'de1ea4fc9d43fc6079dd375e407c2b6d93f5e1a11f49732d13654c41eaf30a65', 'vllm_fl.worker.model_runner': '1d01ac497ad946431cc0a063d5e86116573b3c260fc912e811a9372add5ea131', 'vllm_fl.patches.iluvatar_paged_gqa': '3962f8a666bd8fac8100221e8e349a816096a2d8f5b39f7ed1141c03f815d598', 'flag_gems.runtime.backend._iluvatar.fused.paged_gqa_single_stage': 'd56590191021a2dd96b88d772966d17008c8168a3589fa6ce0d2fab9e4200fa8', 'flag_gems.runtime.backend._iluvatar.fused.iluvatar_mixed_decode': 'fe974d1abcb97516320e4a96f31a9244ebe857278cb6d435f761bbceb35c33b2'}
 
@@ -58,6 +59,8 @@ def _proof(runner, kwargs, result, frame):
             or any(batch.req_id_to_index.get(rid) != i for i, rid in enumerate(ids))):
         return None
     scheduled = kwargs['num_scheduled_tokens']
+    if scheduled is not frame['scheduled'].num_scheduled_tokens:
+        return None
     if any(rid not in scheduled or type(scheduled[rid]) is not int
            or scheduled[rid] <= 0 for rid in ids):
         return None
@@ -73,6 +76,26 @@ def _proof(runner, kwargs, result, frame):
     if any(q == 1 and (c < 4096 or c < p)
            for q, c, p in zip(lengths, computed, prompts)):
         return None
+    # _prepare_inputs has already produced the parent's discard mask from
+    # these same request states. Resumed requests can have old output tokens
+    # left to recompute even after computed >= prompt. Only an exact frontier
+    # with a parent-valid sample is ordinary decode. Async output placeholders
+    # are already counted by CachedRequestState and InputBatch; do not predict
+    # their lengths or read the optimistic sequence-length buffer.
+    for i, (rid, q, c, p) in enumerate(zip(ids, lengths, computed, prompts)):
+        if q != 1:
+            continue
+        request = runner.requests.get(rid)
+        if (type(request) is not _REQUEST_CLASS or request.req_id != rid
+                or request.num_computed_tokens != c
+                or request.num_prompt_tokens != p
+                or request.num_tokens != c + 1
+                or batch.num_tokens_no_spec[i] != request.num_tokens
+                or request.sampling_params is None
+                or request.pooling_params is not None
+                or request.prev_num_draft_len != 0
+                or bool(runner.discard_request_mask.np[i])):
+            return None
     cu = [0]
     for length in lengths:
         cu.append(cu[-1] + length)
@@ -147,7 +170,7 @@ def _eligible(a, frame):
 
 def install(runner):
     global _INSTALLED, _BASELINE, _DISPATCH, _FUSED
-    global _BACKEND, _FG, _PAGED, _RUNNER_CLASS, _BATCH_CLASS
+    global _BACKEND, _FG, _PAGED, _RUNNER_CLASS, _BATCH_CLASS, _REQUEST_CLASS
     global _BUILD_FUNCTION, _EXECUTE_FUNCTION, _MODEL_FUNCTION
     import os
     if (os.getenv('VLLM_FL_TASK070_MIXED_DECODE', '0') != '1'
@@ -156,7 +179,7 @@ def install(runner):
         return False
     from vllm.platforms import current_platform
     from vllm.v1.attention.backends import triton_attn as backend
-    from vllm.v1.worker.gpu_input_batch import InputBatch
+    from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
     from vllm_fl.worker.model_runner import ModelRunnerFL
     from vllm_fl.patches import iluvatar_paged_gqa as paged
     from flag_gems.runtime.backend._iluvatar.fused import iluvatar_mixed_decode as fg
@@ -190,6 +213,7 @@ def install(runner):
             return False
         _BACKEND, _FG, _PAGED = backend, fg, paged
         _RUNNER_CLASS, _BATCH_CLASS = ModelRunnerFL, InputBatch
+        _REQUEST_CLASS = CachedRequestState
         _BUILD_FUNCTION = ModelRunnerFL._build_attention_metadata
         _EXECUTE_FUNCTION = ModelRunnerFL.execute_model
         _MODEL_FUNCTION = ModelRunnerFL._model_forward
@@ -262,7 +286,8 @@ def install(runner):
             potentially_mixed = False
         if not potentially_mixed and _ACTIVE.get() is None:
             return original_execute(*args, **kwargs)
-        token = _ACTIVE.set(dict(runner=runner, proof=None, in_model=False))
+        token = _ACTIVE.set(dict(runner=runner, scheduled=scheduled,
+                                 proof=None, in_model=False))
         try:
             return original_execute(*args, **kwargs)
         finally:
