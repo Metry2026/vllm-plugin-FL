@@ -95,6 +95,7 @@ where = ["."]
 include = ["vllm_fl*"]
 
 [tool.setuptools.package-data]
+"vllm_fl" = ["configs/moe/*.json"]
 "vllm_fl.dispatch.config" = ["*.yaml"]
 
 [tool.pytest.ini_options]
