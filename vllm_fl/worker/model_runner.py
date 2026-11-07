@@ -626,6 +626,10 @@ class ModelRunnerFL(
         if os.getenv("VLLM_FL_TASK069_PRIVATE_SAMPLING", "0") == "1":
             from vllm_fl.patches.iluvatar_private_sampling import install
             self._task069_private_sampling_installed = install()
+        self._task071_kv_writer_w4_installed = False
+        if os.getenv("VLLM_FL_TASK071_KV_WRITER_W4", "0") == "1":
+            from vllm_fl.patches.iluvatar_kv_writer_w4 import install
+            self._task071_kv_writer_w4_installed = install(self)
         self.sampler = Sampler(
             logprobs_mode=self.model_config.logprobs_mode,
             use_fp64_gumbel=self.model_config.use_fp64_gumbel,
