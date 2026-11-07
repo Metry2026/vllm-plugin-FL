@@ -53,6 +53,9 @@ def _entry(*args, **kwargs):
 
 
 def _eligible(a):
+    if (_get_current_function_mode() is not None
+            or _get_current_dispatch_mode() is not None):
+        return False
     # These values were already computed by the unchanged stock prelude.
     if (a['num_warps'] != 16 or a['num_stages'] != 10
             or a['TILE_SIZE'] != 256 or a['num_heads'] != 2
