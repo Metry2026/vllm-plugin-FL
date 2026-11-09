@@ -7,6 +7,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -568,6 +569,14 @@ class ModelRunnerFL(
             logprobs_mode=self.model_config.logprobs_mode,
             use_fp64_gumbel=self.model_config.use_fp64_gumbel,
         )
+
+        # Frozen opt-in for the exact MetaX private native sampling call.
+        self._metax_task011_private_quotient = False
+        if os.environ.get("VLLM_FL_METAX_TASK011_PRIVATE_QUOTIENT", "0") == "1":
+            from vllm_fl.worker.metax_private_quotient import bind_private_quotient
+            self._metax_task011_private_quotient = bind_private_quotient(
+                self.sampler.topk_topp_sampler, self.max_num_reqs
+            )
 
         self.eplb_state: EplbState | None = None
         self._moe_model: MixtureOfExperts | None = None
