@@ -7,6 +7,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -275,6 +276,10 @@ from vllm.v1.worker.utils import (
 
 # FL-specific imports
 from vllm_fl.compilation.graph import GraphWrapper
+from vllm_fl.worker.metax_integer_outputs import (
+    fuse_integer_outputs,
+    integer_output_layout_supported,
+)
 from vllm_fl.dispatch.io_common import managed_inference_mode
 from vllm_fl.dispatch.io_dumper import (
     advance_io_step,
@@ -483,6 +488,9 @@ class ModelRunnerFL(
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        self._metax_task008_integer_output_fusion = (
+            os.environ.get("VLLM_FL_METAX_TASK008_INTEGER_OUTPUT_FUSION", "0") == "1"
+        )
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -2177,14 +2185,47 @@ class ModelRunnerFL(
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
-        self.positions[:total_num_scheduled_tokens] = (
-            self.num_computed_tokens[req_indices_gpu].to(torch.int64)
-            + self.query_pos.gpu[:total_num_scheduled_tokens]
+        integer_output_fusion = (
+            self._metax_task008_integer_output_fusion
+            and self.__class__ is ModelRunnerFL
+            and self.speculative_config is None
+            and not self.use_async_spec_decode
+            and not scheduler_output.scheduled_spec_decode_tokens
+            and not self.uses_mrope
+            and self.uses_xdrope_dim == 0
+            and isinstance(num_scheduled_tokens, np.ndarray)
+            and num_scheduled_tokens.dtype == np.int32
+            and num_scheduled_tokens.ndim == 1
+            and num_scheduled_tokens.size == num_reqs
+            and total_num_scheduled_tokens == num_reqs
+            and num_reqs <= self.max_num_reqs
+            and total_num_scheduled_tokens <= self.max_num_tokens
+            and bool(np.all(num_scheduled_tokens == 1))
+            and len(self.input_batch.req_ids) == num_reqs
+            and len(scheduler_output.num_scheduled_tokens) == num_reqs
+            and all(scheduler_output.num_scheduled_tokens.get(req_id) == 1
+                    for req_id in self.input_batch.req_ids)
+            and integer_output_layout_supported(
+                self.num_computed_tokens, self.req_indices.gpu, self.query_pos.gpu,
+                self.num_scheduled_tokens.gpu, self.positions, self.seq_lens,
+                num_reqs, total_num_scheduled_tokens,
+            )
         )
-        self.seq_lens[:num_reqs] = (
-            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
-        )
-        self.seq_lens[num_reqs:].fill_(0)
+        if integer_output_fusion:
+            fuse_integer_outputs(
+                self.num_computed_tokens, self.req_indices.gpu, self.query_pos.gpu,
+                self.num_scheduled_tokens.gpu, self.positions, self.seq_lens,
+                num_reqs, total_num_scheduled_tokens,
+            )
+        else:
+            self.positions[:total_num_scheduled_tokens] = (
+                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+                + self.query_pos.gpu[:total_num_scheduled_tokens]
+            )
+            self.seq_lens[:num_reqs] = (
+                self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
+            )
+            self.seq_lens[num_reqs:].fill_(0)
 
         self.input_batch.block_table.compute_slot_mapping(
             num_reqs,
