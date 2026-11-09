@@ -7,6 +7,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -782,6 +783,19 @@ class ModelRunnerFL(
         )
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 1, dtype=torch.int32
+        )
+        # Private immutable storage: never borrow the mutable CU buffer.
+        # Initialize on the same current stream as the other runner buffers;
+        # the normal initialization-to-execution ordering is unchanged.
+        self._metax_task009_readonly_logits_indices = (
+            os.getenv("VLLM_FL_METAX_TASK009_READONLY_LOGITS_INDICES", "0") == "1"
+        )
+        self._metax_task009_logits_indices = (
+            torch.arange(
+                self.max_num_reqs, dtype=torch.int32, device=self.device
+            )
+            if self._metax_task009_readonly_logits_indices
+            else None
         )
         self.seq_lens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
@@ -2228,7 +2242,49 @@ class ModelRunnerFL(
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            logits_indices = query_start_loc[1:] - 1
+            # The original CU construction, upload and every other reader are
+            # retained above. Prove this round's ordered all-one schedule on
+            # the CPU before selecting the independent read-only prefix.
+            metax_task009_use_readonly_logits_indices = (
+                self._metax_task009_readonly_logits_indices
+                and type(self) is ModelRunnerFL
+                and self.speculative_config is None
+                and not self.use_async_spec_decode
+                and not self.uses_mrope
+                and self.uses_xdrope_dim == 0
+                and self.lora_config is None
+                and not self.enable_prompt_embeds
+                and not self.is_pooling_model
+                and not self.broadcast_pp_output
+                and not self.cache_config.kv_sharing_fast_prefill
+                and 0 < num_reqs <= self.max_num_reqs
+                and total_num_scheduled_tokens == num_reqs
+                and num_scheduled_tokens.dtype == np.int32
+                and num_scheduled_tokens.shape == (num_reqs,)
+                and bool(np.all(num_scheduled_tokens == 1))
+                and len(self.input_batch.req_ids) == num_reqs
+                and len(scheduler_output.num_scheduled_tokens) == num_reqs
+                and all(
+                    scheduler_output.num_scheduled_tokens.get(req_id) == 1
+                    for req_id in self.input_batch.req_ids
+                )
+                and self._metax_task009_logits_indices is not None
+                and self._metax_task009_logits_indices.dtype == torch.int32
+                and self._metax_task009_logits_indices.ndim == 1
+                and self._metax_task009_logits_indices.stride() == (1,)
+                and self._metax_task009_logits_indices.numel() >= num_reqs
+                and query_start_loc.dtype == torch.int32
+                and query_start_loc.ndim == 1
+                and query_start_loc.stride() == (1,)
+                and query_start_loc.numel() == num_reqs + 1
+                and query_start_loc.is_cuda
+                and query_start_loc.device
+                == self._metax_task009_logits_indices.device
+            )
+            if metax_task009_use_readonly_logits_indices:
+                logits_indices = self._metax_task009_logits_indices[:num_reqs]
+            else:
+                logits_indices = query_start_loc[1:] - 1
             spec_decode_metadata = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
         else:
