@@ -39,6 +39,7 @@ if is_flash_attn_varlen_func_available():
         reshape_and_cache_flash,
         flash_attn_with_kvcache,  # used for prefill decode split
     )
+    from .utils.decode_direct_output import try_decode_output as _try_decode_output
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
@@ -850,22 +851,35 @@ class FlashAttentionImpl(AttentionImpl):
                     decode_query = reshape_query_for_spec_decode(
                         decode_query, attn_metadata.num_decodes
                     )
-                    output_unreshape = flash_attn_with_kvcache(
-                        q=decode_query,
-                        k_cache=key_cache,
-                        v_cache=value_cache,
-                        block_table=attn_metadata.decode_block_table,
-                        cache_seqlens=attn_metadata.decode_seq_lens,
-                        softmax_scale=self.scale,
-                        causal=True,
-                        window_size=self.sliding_window,
-                        alibi_slopes=self.alibi_slopes,
-                        softcap=self.logits_soft_cap,
-                        s_aux=self.sinks,
-                    )
-                    output[:num_decode_tokens] = reshape_attn_output_for_spec_decode(
-                        output_unreshape
-                    )
+                    if not (
+                        attn_type == AttentionType.DECODER
+                        and type(attn_metadata) is FlashAttentionMetadata
+                        and _try_decode_output(
+                            flash_attn_with_kvcache, decode_query,
+                            key_cache, value_cache, output,
+                            attn_metadata.decode_block_table,
+                            attn_metadata.decode_seq_lens,
+                            self.scale, self.sliding_window, self.logits_soft_cap,
+                            self.alibi_slopes, self.sinks, attn_metadata,
+                            query, key, value, kv_cache,
+                        )
+                    ):
+                        output_unreshape = flash_attn_with_kvcache(
+                            q=decode_query,
+                            k_cache=key_cache,
+                            v_cache=value_cache,
+                            block_table=attn_metadata.decode_block_table,
+                            cache_seqlens=attn_metadata.decode_seq_lens,
+                            softmax_scale=self.scale,
+                            causal=True,
+                            window_size=self.sliding_window,
+                            alibi_slopes=self.alibi_slopes,
+                            softcap=self.logits_soft_cap,
+                            s_aux=self.sinks,
+                        )
+                        output[:num_decode_tokens] = reshape_attn_output_for_spec_decode(
+                            output_unreshape
+                        )
                 return output
             # └------------------------- Metax Modification -------------------------┘
 
